@@ -449,6 +449,32 @@ class Engine:
         else:  # pragma: no cover - GENERIC_SIGNAL_TYPES and these branches must stay in sync
             raise ValueError(f"generic signal without handler: {signal.type}")
 
+    async def _apply_resolution_channel(
+        self, session: AsyncSession, instance: WorkflowInstance, resolution: dict[str, Any],
+        source_event_id: uuid.UUID | None, now: datetime,
+    ) -> None:
+        """"Try them another way" as a resolution: the human's channel choice is stored
+        as a preferred_channel fact on the target contact, so every later send follows
+        it. Same write-back path the brain uses - a person is just a very confident
+        source."""
+        channel = resolution.get("channel")
+        target = instance.context.get("target_contact_id")
+        if not channel or not target or channel not in CHANNEL_ADDRESS_FIELD:
+            return
+        fact = await self.write_back.apply(
+            session,
+            EntityUpdate(entity_type="contact", entity_id=str(target), field="preferred_channel",
+                         new_value=channel, confidence=1.0, evidence="chosen by a reviewer"),
+            source_event_id=source_event_id, now=now,
+        )
+        await log_event(
+            session, instance.id, f"fact_{fact.status}",
+            {"entity_type": fact.entity_type, "entity_id": str(fact.entity_id), "field": fact.field,
+             "old_value": fact.old_value, "new_value": fact.new_value, "confidence": fact.confidence,
+             "fact_id": str(fact.id), "source": "review"},
+            now=now,
+        )
+
     async def _complete_pending_requirement(
         self, session: AsyncSession, instance: WorkflowInstance, resolution: dict[str, Any], by: str, now: datetime
     ) -> bool:
@@ -492,10 +518,11 @@ class Engine:
         if was_blocked and not pending:
             instance.status = "active"
         instance.updated_at = now
-        await log_event(
+        review_event = await log_event(
             session, instance.id, "review_resolved",
             {"review_task_id": str(task.id), "reason": task.reason, "resolution": resolution, "by": resolved_by}, now=now,
         )
+        await self._apply_resolution_channel(session, instance, resolution, review_event.id, now)
         await self._complete_pending_requirement(session, instance, resolution, resolved_by, now)
         await self.definition_for(instance).on_review_resolved(instance, task, self.ctx(session))
         await self._rearm_wake_if_unblocked(session, instance, was_blocked, now)

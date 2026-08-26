@@ -163,6 +163,15 @@ async def api_tick(runtime: Runtime = Depends(rt)):
         return [{"instance_id": str(i), "result": r} for i, r in await runtime.engine.run_due(s)]
 
 
+def ladder_sizes(runtime: Runtime) -> dict[str, int]:
+    """How many retries each workflow declares - so "attempts 2" can be shown as
+    "2 of 2" and a blocked instance reads as finished, not stuck."""
+    return {
+        wt: len(((runtime.registry.get(wt).retry_policy or {}).get("no_answer") or {}).get("schedule") or [])
+        for wt in runtime.registry.types()
+    }
+
+
 def clock_state(runtime: Runtime) -> dict[str, Any]:
     clock = runtime.clock
     travelling = isinstance(clock, OffsetClock)
@@ -272,7 +281,7 @@ async def dashboard(request: Request, s: AsyncSession = Depends(session), runtim
     return TEMPLATES.TemplateResponse(
         request, "dashboard.html",
         {"instances": instances, "reviews": reviews, "workflow_types": runtime.registry.types(),
-         "clock": clock_state(runtime)},
+         "clock": clock_state(runtime), "ladders": ladder_sizes(runtime)},
     )
 
 
@@ -296,7 +305,8 @@ async def instance_page(
     return TEMPLATES.TemplateResponse(
         request, "instance.html",
         {"instance": inst, "events": events, "rounds": build_rounds(events),
-         "reviews": reviews, "case": case, "contacts": contacts, "clock": clock_state(runtime)},
+         "reviews": reviews, "case": case, "contacts": contacts, "clock": clock_state(runtime),
+         "ladders": ladder_sizes(runtime)},
     )
 
 
@@ -306,6 +316,21 @@ async def advance_form(request: Request, runtime: Runtime = Depends(rt)):
     body = AdvanceIn(duration=(form.get("duration") or None))
     await api_advance(body, runtime)
     return RedirectResponse(request.headers.get("referer") or "/", status_code=303)
+
+
+@app.post("/instances/{instance_id}/inbound")
+async def inbound_form(instance_id: uuid.UUID, request: Request, runtime: Runtime = Depends(rt)):
+    """Reply as the other party, from the instance page - the same path a real inbound
+    webhook would take."""
+    form = await request.form()
+    text_ = (form.get("text") or "").strip()
+    if text_:
+        async with runtime.session_factory() as s, s.begin():
+            try:
+                await runtime.engine.handle_inbound(s, instance_id, text_, channel=form.get("channel") or "sms")
+            except KeyError as exc:
+                raise HTTPException(404, str(exc)) from None
+    return RedirectResponse(f"/instances/{instance_id}", status_code=303)
 
 
 @app.post("/review-queue/{task_id}/resolve")
@@ -318,6 +343,9 @@ async def resolve_form(task_id: uuid.UUID, request: Request, runtime: Runtime = 
     reference = (form.get("reference") or "").strip()
     if reference:
         resolution["reference"] = reference
+    channel = (form.get("channel") or "").strip()
+    if channel:
+        resolution["channel"] = channel
     async with runtime.session_factory() as s, s.begin():
         try:
             await runtime.engine.resolve_review_task(

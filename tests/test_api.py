@@ -260,3 +260,75 @@ async def test_advance_is_refused_on_the_real_clock(rt, seed):
             assert (await c.get("/api/clock")).json()["time_travel"] is False
     finally:
         rt.clock = rt.engine.clock = original
+
+
+async def test_review_options_are_all_actionable(client, rt, seed):
+    """The queue used to print "try alternate channel" with no button behind it. Every
+    option offered must now do something the engine can actually carry out."""
+    from app.db.facts import get_entity_field
+
+    r = await client.post(
+        "/api/instances",
+        json={"workflow_type": "medical_records_followup", "case_id": str(seed.case_id), "context": medical_context(seed)},
+    )
+    iid = r.json()["id"]
+    for _ in range(4):
+        await client.post("/api/simulate/inbound", json={"instance_id": iid, "text": "no answer"})
+    task = next(t for t in (await client.get("/api/review-queue")).json() if t["instance_id"] == iid)
+
+    page = (await client.get("/")).text
+    assert 'name="channel"' in page and "try by email" in page
+
+    # "try them another way" -> stored as a preferred_channel fact, then resume
+    r = await client.post(f"/review-queue/{task['id']}/resolve", data={"action": "retry", "channel": "email"})
+    assert r.status_code == 303
+    async with rt.session_factory() as s:
+        assert await get_entity_field(s, "contact", seed.provider_id, "preferred_channel") == "email"
+
+    inst = (await client.get(f"/api/instances/{iid}")).json()
+    assert inst["status"] == "active" and inst["attempt_count"] == 0
+
+    rt.channel.outbox.clear()
+    assert [x["result"] for x in (await client.post("/api/simulate/tick")).json() if x["instance_id"] == iid] == ["executed"]
+    assert rt.channel.outbox[-1].channel == "email", "the human's channel choice is honoured on the next send"
+
+
+async def test_attempts_show_the_ladder_size(client, rt, seed):
+    """"attempts 2" on a two-rung ladder looks like a premature escalation until the
+    denominator is visible."""
+    r = await client.post(
+        "/api/instances",
+        json={"workflow_type": "client_checkin", "case_id": str(seed.case_id),
+              "context": {"target_contact_id": str(seed.client_id), "client_contact_id": str(seed.client_id)}},
+    )
+    iid = r.json()["id"]
+    for _ in range(3):
+        await client.post("/api/simulate/inbound", json={"instance_id": iid, "text": "no answer"})
+
+    assert (await client.get(f"/api/instances/{iid}")).json()["status"] == "blocked"
+    page = (await client.get("/")).text
+    assert "of 2" in page, "the dashboard shows attempts against the declared ladder"
+    inst_page = (await client.get(f"/instances/{iid}")).text
+    assert "of 2 before handing off" in inst_page
+
+
+async def test_reply_box_drives_an_instance_from_the_page(client, rt, seed):
+    """Where the payment case comes from: somebody has to reply. The instance page can
+    now do that, instead of it only being reachable over the API."""
+    r = await client.post(
+        "/api/instances",
+        json={"workflow_type": "medical_records_followup", "case_id": str(seed.case_id), "context": medical_context(seed)},
+    )
+    iid = r.json()["id"]
+    page = (await client.get(f"/instances/{iid}")).text
+    assert "Reply as" in page and 'action="/instances/' in page
+
+    r = await client.post(
+        f"/instances/{iid}/inbound",
+        data={"text": "There is a $45 records fee, pay at pay.mercy.example first.", "channel": "email"},
+    )
+    assert r.status_code == 303
+
+    inst = (await client.get(f"/api/instances/{iid}")).json()
+    assert inst["context"]["pending_requirement"]["action_type"] == "payment"
+    assert inst["status"] == "blocked"

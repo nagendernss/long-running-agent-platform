@@ -4,7 +4,7 @@
 <h2>Review queue &mdash; {{ reviews|length }} pending</h2>
 {% if reviews %}
 <table>
-  <tr><th>Raised</th><th>Needs a human</th><th>Suggested</th><th>Resolve</th></tr>
+  <tr><th>Raised</th><th>Needs a human</th><th>Resolve</th></tr>
   {% for t in reviews %}
     {% include "_review_row.html" with context %}
   {% endfor %}
@@ -21,7 +21,7 @@
     <td>{{ i.workflow_type }}</td>
     <td class="mono">{{ i.state }}</td>
     <td><span class="pill {{ i.status }}">{{ i.status }}</span></td>
-    <td>{{ i.attempt_count }}</td>
+    <td class="mono">{{ i.attempt_count }}{% if ladders.get(i.workflow_type) %} <span class="dim">of {{ ladders[i.workflow_type] }}</span>{% endif %}</td>
     <td class="mono dim">{{ i.next_wake_at.strftime('%Y-%m-%d %H:%M') if i.next_wake_at else '—' }}</td>
     <td class="dim">{{ i.wake_reason or '' }}</td>
   </tr>

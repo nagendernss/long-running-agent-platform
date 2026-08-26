@@ -42,7 +42,11 @@
     form.resolve { display:flex; gap:6px; margin-bottom:6px; }
     input[type=text] { background:#12151b; color:var(--fg); border:1px solid var(--line);
                        border-radius:6px; padding:4px 8px; font-size:12px; }
-    input[type=text]:focus { outline:none; border-color:var(--accent); }
+    input[type=text]:focus, select:focus { outline:none; border-color:var(--accent); }
+    select { background:#12151b; color:var(--fg); border:1px solid var(--line); border-radius:6px;
+             padding:4px 6px; font-size:12px; }
+    form.reply { display:flex; gap:8px; margin-top:8px; }
+    form.reply input[type=text] { flex:1; }
 
     /* --- instance timeline: two lanes around a spine, rounds as attempts --- */
     .tl { --spine: 150px; margin-top:10px; }

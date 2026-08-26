@@ -1,6 +1,5 @@
-{# One review-queue row. `action_required:*` tasks carry a structured requirement,
-   so they get the particulars a paralegal needs plus a reference box; everything
-   else gets the plain retry/close pair. #}
+{# One review-queue row. Every option offered here is one the engine can actually
+   carry out - a suggestion with no button behind it is just noise. #}
 {% set req = (t.context_snapshot or {}).get('requirement') %}
 <tr>
   <td class="dim mono">{{ t.created_at.strftime('%m-%d %H:%M') if t.created_at }}</td>
@@ -15,12 +14,14 @@
       </div>
     {% else %}
       {{ t.reason }}
+      {% if t.context_snapshot and t.context_snapshot.get('attempts') is not none %}
+        <div class="dim">after {{ t.context_snapshot.attempts }} attempts</div>
+      {% endif %}
     {% endif %}
     {% if show_instance %}
       <div class="dim">on <a class="mono" href="/instances/{{ t.instance_id }}">{{ t.instance_id.hex[:8] }}</a></div>
     {% endif %}
   </td>
-  <td class="dim">{{ (t.suggested_options or [])|join(', ') }}</td>
   <td>
     {% if req %}
       <form method="post" action="/review-queue/{{ t.id }}/resolve" class="resolve">
@@ -31,11 +32,21 @@
         </button>
       </form>
     {% endif %}
-    {% for action in ['retry', 'close'] %}
-    <form class="inline" method="post" action="/review-queue/{{ t.id }}/resolve">
-      <input type="hidden" name="action" value="{{ action }}">
-      <button type="submit">{{ action }}</button>
+
+    <form method="post" action="/review-queue/{{ t.id }}/resolve" class="resolve">
+      <input type="hidden" name="action" value="retry">
+      <select name="channel" title="Stored as this contact's preferred channel, then outreach resumes">
+        <option value="">same channel</option>
+        <option value="call">try by call</option>
+        <option value="sms">try by SMS</option>
+        <option value="email">try by email</option>
+      </select>
+      <button type="submit">retry</button>
     </form>
-    {% endfor %}
+
+    <form class="inline" method="post" action="/review-queue/{{ t.id }}/resolve">
+      <input type="hidden" name="action" value="close">
+      <button type="submit" title="Stop chasing and complete the instance">close</button>
+    </form>
   </td>
 </tr>

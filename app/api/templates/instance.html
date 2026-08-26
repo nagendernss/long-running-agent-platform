@@ -5,7 +5,7 @@
 <table>
   <tr><th>State</th><td class="mono">{{ instance.state }}</td>
       <th>Status</th><td><span class="pill {{ instance.status }}">{{ instance.status }}</span></td></tr>
-  <tr><th>Attempts</th><td>{{ instance.attempt_count }}</td>
+  <tr><th>Attempts</th><td class="mono">{{ instance.attempt_count }}{% if ladders.get(instance.workflow_type) %} <span class="dim">of {{ ladders[instance.workflow_type] }} before handing off</span>{% endif %}</td>
       <th>Next wake</th><td class="mono">{{ instance.next_wake_at or '—' }} <span class="dim">{{ instance.wake_reason or '' }}</span></td></tr>
   <tr><th>Case</th><td class="mono">{{ case.matter_type if case else '—' }}</td>
       <th>Contacts</th><td>{% for role, c in contacts.items() %}{% if c %}<div>{{ role }}: {{ c.name }} <span class="dim mono">{{ c.phone or c.email }}</span></div>{% endif %}{% endfor %}</td></tr>
@@ -44,7 +44,7 @@
 {% if reviews %}
 <h2>Review tasks</h2>
 <table>
-  <tr><th>Raised</th><th>Needs a human</th><th>Suggested</th><th>Resolve</th></tr>
+  <tr><th>Raised</th><th>Needs a human</th><th>Resolve</th></tr>
   {% for t in reviews %}
     {% if t.status == 'pending' %}{% include "_review_row.html" with context %}{% else %}
     <tr>
@@ -56,6 +56,20 @@
     {% endif %}
   {% endfor %}
 </table>
+{% endif %}
+
+{% if instance.status != 'completed' %}
+<h2>Reply as {{ (contacts.get('target_contact_id').name if contacts.get('target_contact_id') else 'the other party') }}</h2>
+<form method="post" action="/instances/{{ instance.id }}/inbound" class="reply">
+  <input type="text" name="text" placeholder="e.g. There is a $45 records fee, pay at pay.mercy.example" required>
+  <select name="channel">
+    <option value="call">call</option>
+    <option value="sms">sms</option>
+    <option value="email">email</option>
+  </select>
+  <button type="submit">send inbound</button>
+</form>
+<p class="dim" style="margin:6px 0 0">Goes through the same path a real webhook would: the agent brain reads it, the engine acts on it.</p>
 {% endif %}
 
 <h2>How it played out &mdash; {{ events|length }} events, {{ rounds|length }} attempt{{ '' if rounds|length == 1 else 's' }}</h2>
