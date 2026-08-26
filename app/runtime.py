@@ -37,6 +37,7 @@ def build_brain(settings: Settings, registry: WorkflowRegistry, field_registry: 
         settings.gemini_api_key,
         model=settings.gemini_model,
         domain_signals_for=lambda wt: registry.get(wt).domain_signals,
+        prompt_notes_for=lambda wt: getattr(registry.get(wt), "prompt_notes", None),
         field_registry=field_registry,
         fallback=rules,
     )

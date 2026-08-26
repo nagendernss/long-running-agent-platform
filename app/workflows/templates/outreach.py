@@ -54,6 +54,9 @@ class OutreachSpec(BaseModel):
     description: str | None = None
     channel: Literal["call", "sms", "email"] = "sms"
     recipient_key: str = "target_contact_id"
+    # Who this type contacts. A check-in always reaches a client, a records chase
+    # always a provider - so it belongs to the type, not to each agent started from it.
+    contact_role: Literal["client", "provider", "staff"] = "client"
 
     retry_count: int = Field(default=2, ge=0, le=10)
     retry_interval_days: int = Field(default=2, ge=1, le=90)
@@ -112,6 +115,7 @@ class OutreachTemplate(BaseWorkflow):
         # A repeating workflow starts idle and moves to awaiting on each send; a
         # one-shot starts by waiting for the acknowledgement.
         self.initial_state = spec.idle_state if spec.on_reply == "repeat" else spec.awaiting_state
+        self.contact_role = spec.contact_role
         self.retry_policy = {"no_answer": {"schedule": spec.ladder()}}
         self.response_deadline = f"{spec.response_deadline_days}d"
         self.domain_signals = [Acknowledged] + ([Flagged] if spec.escalate_keywords else [])

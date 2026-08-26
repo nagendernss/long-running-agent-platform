@@ -20,11 +20,6 @@
     <label>Email<input type="text" name="email" placeholder="jane@example.com"></label>
   </div>
   <div class="row">
-    <label>They are a
-      <select name="role">
-        {% for r in ['client', 'provider', 'staff'] %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
-      </select>
-    </label>
     <label>Timezone
       <select name="timezone">
         {% for z in ['America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'Europe/London', 'Asia/Kolkata'] %}

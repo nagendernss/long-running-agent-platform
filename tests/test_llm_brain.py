@@ -289,3 +289,28 @@ async def test_live_gemini_extracts_signals():
     checkin_ctx = {**CTX, "workflow_type": "client_checkin"}
     flagged = await brain.extract_signals("honestly the pain has been getting worse and I barely sleep", checkin_ctx)
     assert any(s.type in {"CLIENT_FLAG", "NEEDS_HUMAN"} for s in flagged)
+
+
+# ---------------------------------------------------------------- who is speaking
+def test_the_prompt_says_who_replied():
+    """"The pain is worse" from a client is significant; from a provider's records desk
+    it is usually about a patient. The brain cannot tell without being told."""
+    brain = stub_brain(lambda r: gemini_reply([]))
+    ctx = {**CTX, "target_contact_name": "Mercy Records", "target_contact_role": "provider"}
+    prompt = brain._prompt(ctx, brain.signal_classes("medical_records_followup"))
+    assert "Mercy Records, a provider" in prompt
+    assert "coming from that party" in prompt
+
+
+def test_the_prompt_copes_with_a_contact_it_knows_nothing_about():
+    brain = stub_brain(lambda r: gemini_reply([]))
+    prompt = brain._prompt(CTX, brain.signal_classes("medical_records_followup"))
+    assert "the other party" in prompt
+
+
+def test_a_workflows_own_note_reaches_the_prompt():
+    """The outreach template builds a note from its escalation keywords; it is useless
+    unless the brain actually sends it."""
+    brain = stub_brain(lambda r: gemini_reply([]), prompt_notes_for=lambda wt: "treat mentions of frost as FLAGGED")
+    prompt = brain._prompt(CTX, brain.signal_classes("medical_records_followup"))
+    assert "This workflow adds: treat mentions of frost as FLAGGED" in prompt

@@ -64,7 +64,7 @@ PROMPT = """You read one inbound message or call transcript for a law firm's aut
 
 Workflow: {workflow_type}
 Current state: {state}
-Who we are contacting: contact id {target_contact_id}
+Who replied: {target_description} (contact id {target_contact_id})
 Instance context: {context}
 
 Emit every signal the message supports - a message can carry more than one (for example a corrected phone number AND a request to call back later). Emit none only if the message truly says nothing actionable.
@@ -77,6 +77,7 @@ Rules:
 - evidence must be a short verbatim quote from the message.
 - For ENTITY_UPDATE: entity_type is "contact", entity_id is exactly {target_contact_id}, and field must be one of: {writable_fields}.
 - Never invent a value that is not in the message.
+- Read the message as coming from that party. A client describing their own symptoms, distress or dissatisfaction is significant; a provider's office using the same words is usually describing a patient or their process, not themselves.
 - If the message is unclear, contradictory, or emotionally serious, emit NEEDS_HUMAN rather than guessing.
 - A message can both correct a fact and impose a requirement (for example "we do not take these by phone, email the request to x@y and there is a $45 fee") - emit ENTITY_UPDATE and ACTION_REQUIRED together."""
 
@@ -94,6 +95,14 @@ DETAIL_PROPERTIES: dict[str, Any] = {
     "reference": {"type": "string"},
     "notes": {"type": "string"},
 }
+
+
+def _describe_target(workflow_context: dict[str, Any]) -> str:
+    name = workflow_context.get("target_contact_name")
+    role = workflow_context.get("target_contact_role")
+    if name and role:
+        return f"{name}, a {role}"
+    return name or (f"a {role}" if role else "the other party")
 
 
 def _json_type(annotation: Any) -> dict[str, Any]:
@@ -184,6 +193,7 @@ class GeminiAgentBrain:
         *,
         model: str = DEFAULT_MODEL,
         domain_signals_for: Callable[[str], Iterable[type[Signal]]] | None = None,
+        prompt_notes_for: Callable[[str], str | None] | None = None,
         field_registry: FieldRegistry | None = None,
         fallback: AgentBrain | None = None,
         timeout: float = 30.0,
@@ -193,6 +203,7 @@ class GeminiAgentBrain:
         self.api_key = api_key
         self.model = model
         self._domain_signals_for = domain_signals_for or (lambda _wt: [])
+        self._prompt_notes_for = prompt_notes_for or (lambda _wt: None)
         self._writable_fields = sorted(field_registry.field_names()) if field_registry else ["phone", "email"]
         self.fallback = fallback or RuleBasedAgentBrain()
         self.timeout = timeout
@@ -210,9 +221,14 @@ class GeminiAgentBrain:
             guide = SIGNAL_GUIDE.get(name) or (cls.__doc__ or "").strip() or f"Domain signal for {workflow_context.get('workflow_type')}."
             extra = [f for f in cls.model_fields if f not in ("type", "confidence", "evidence")]
             lines.append(f"- {name}: {guide}" + (f" Fields: {', '.join(extra)}." if extra else ""))
+        notes = self._prompt_notes_for(workflow_context.get("workflow_type", ""))
+        if notes:
+            lines.append("")
+            lines.append(f"This workflow adds: {notes}")
         return PROMPT.format(
             workflow_type=workflow_context.get("workflow_type", "unknown"),
             state=workflow_context.get("state", "unknown"),
+            target_description=_describe_target(workflow_context),
             target_contact_id=workflow_context.get("target_contact_id", "unknown"),
             context=json.dumps(workflow_context.get("context", {}), default=str),
             signal_guide="\n".join(lines),

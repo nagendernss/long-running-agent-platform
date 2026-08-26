@@ -48,6 +48,13 @@
         {% endfor %}
       </select>
     </label>
+    <label>Contacts a
+      <select name="contact_role" title="Who this workflow talks to - the agent brain reads replies differently for a client and a provider">
+        {% for r in ['client', 'provider', 'staff'] %}
+        <option value="{{ r }}" {{ 'selected' if spec.contact_role == r else '' }}>{{ r }}</option>
+        {% endfor %}
+      </select>
+    </label>
     <label>Chase<input type="number" name="retry_count" min="0" max="10"
            value="{{ spec.retry_count if spec.retry_count is not none else 2 }}"> times</label>
     <label>Waiting<input type="number" name="retry_interval_days" min="1" max="90"

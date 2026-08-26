@@ -52,6 +52,7 @@ class MedicalRecordsFollowupWorkflow(BaseWorkflow):
     initial_state: ClassVar[str] = "awaiting_reply"
     retry_policy: ClassVar[dict[str, Any]] = {"no_answer": {"schedule": ["2d", "5d", "14d"]}}
     response_deadline: ClassVar[str | None] = "3d"
+    contact_role: ClassVar[str] = "provider"   # we chase the records desk, not the client
     resolution_options: ClassVar[list[dict[str, str]]] = [
         {"action": "records_received", "label": "records received"},
         {"action": "auth_obtained", "label": "authorization signed"},

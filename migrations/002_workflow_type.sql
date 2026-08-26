@@ -19,6 +19,7 @@ INSERT INTO workflow_type (name, template, spec, description) VALUES
       "recipient_key": "target_contact_id",
       "retry_count": 2, "retry_interval_days": 1, "retry_schedule": ["1d", "3d"],
       "response_deadline_days": 2,
+      "contact_role": "client",
       "on_reply": "repeat", "repeat_every_days": 14,
       "escalate_keywords": ["worse", "getting worse", "pain", "hospital", "emergency", "surgery",
                             "depressed", "anxious", "suicidal", "cannot sleep", "another lawyer",

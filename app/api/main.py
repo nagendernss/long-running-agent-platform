@@ -87,7 +87,7 @@ class NewAgentIn(BaseModel):
     timezone: str = "America/New_York"
     business_start: str = "09:00"
     business_end: str = "17:00"
-    role: str = "client"
+    role: str | None = None      # defaults to whoever this workflow contacts
     matter_type: str | None = None
     context: dict[str, Any] = Field(default_factory=dict)
 
@@ -189,8 +189,10 @@ async def api_start_agent(body: NewAgentIn, runtime: Runtime = Depends(rt)):
             raise HTTPException(422, "a contact needs a phone number or an email address")
 
         now = runtime.clock.now()
+        definition = runtime.registry.get(body.workflow_type)
+        role = body.role or getattr(definition, "contact_role", "client")
         contact = Contact(
-            id=uuid.uuid4(), name=body.contact_name, role=body.role, phone=body.phone or None,
+            id=uuid.uuid4(), name=body.contact_name, role=role, phone=body.phone or None,
             email=body.email or None, timezone=body.timezone,
             business_hours={"start": body.business_start, "end": body.business_end}, created_at=now,
         )
@@ -204,7 +206,6 @@ async def api_start_agent(body: NewAgentIn, runtime: Runtime = Depends(rt)):
             s.add(case)
             await s.flush()
 
-        definition = runtime.registry.get(body.workflow_type)
         recipient_key = getattr(getattr(definition, "spec", None), "recipient_key", "target_contact_id")
         context = {
             "target_contact_id": str(contact.id),
@@ -440,6 +441,7 @@ def _spec_from_form(form) -> dict[str, Any]:
         "retry_interval_days": int(form.get("retry_interval_days") or 2),
         "response_deadline_days": int(form.get("response_deadline_days") or 2),
         "on_reply": form.get("on_reply") or "complete",
+        "contact_role": form.get("contact_role") or "client",
         "escalate_keywords": keywords,
     }
     if spec["on_reply"] == "repeat":
@@ -498,7 +500,6 @@ async def new_instance_create(request: Request, runtime: Runtime = Depends(rt)):
             timezone=form.get("timezone") or "America/New_York",
             business_start=form.get("business_start") or "09:00",
             business_end=form.get("business_end") or "17:00",
-            role=form.get("role") or "client",
             matter_type=(form.get("matter_type") or "").strip() or None,
             context=_parse_pairs(form.get("context_pairs") or ""),
         )

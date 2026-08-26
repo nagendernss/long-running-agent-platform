@@ -205,3 +205,38 @@ async def test_the_start_form_says_what_is_wrong_rather_than_failing_silently(cl
         "business_start": "09:00", "business_end": "17:00", "context_pairs": "",
     })
     assert r.status_code == 303 and "error=" in r.headers["location"]
+
+
+async def test_the_workflow_decides_the_contacts_role_not_the_form(client, rt):
+    """Role was a dropdown on every agent form, and nothing read it. It belongs to the
+    workflow - a records chase always reaches a provider - and now feeds the brain."""
+    page = (await client.get("/instances/new")).text
+    assert 'name="role"' not in page, "no longer asked per agent"
+
+    await client.post("/workflows", data={
+        "name": "vendor_chase", "message": "Hi {contact_name}", "channel": "email",
+        "contact_role": "provider", "retry_count": "1", "retry_interval_days": "1",
+        "response_deadline_days": "1", "on_reply": "complete", "escalate_keywords": "",
+    })
+    r = await client.post("/api/agents", json={
+        "workflow_type": "vendor_chase", "contact_name": "Ciox Desk", "email": "desk@ciox.example",
+    })
+    contact_id = r.json()["contact_id"]
+
+    from app.db.models import Contact
+    async with rt.session_factory() as s:
+        assert (await s.get(Contact, __import__("uuid").UUID(contact_id))).role == "provider"
+
+
+async def test_the_brain_is_told_who_it_is_reading(rt, seed):
+    """End to end: the role on the contact reaches the extraction context."""
+    from tests.helpers import medical_context
+
+    async with rt.session_factory() as s, s.begin():
+        inst = await rt.engine.start_instance(
+            s, "medical_records_followup", case_id=seed.case_id, context=medical_context(seed)
+        )
+        ctx = await rt.engine._brain_context(s, inst)
+
+    assert ctx["target_contact_name"] == "Mercy Hospital Records"
+    assert ctx["target_contact_role"] == "provider"
