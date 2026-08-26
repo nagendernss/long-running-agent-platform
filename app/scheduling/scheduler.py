@@ -34,6 +34,9 @@ log = logging.getLogger(__name__)
 TASK_NAME = "hc:execute_instance_wakeup"
 RECOVERY_TASK_NAME = "hc:recover_lost_wakes"
 RECOVERY_CRON = "*/5 * * * *"   # cheap: two indexed queries when nothing is wrong
+CLEANUP_TASK_NAME = "hc:prune_finished_jobs"
+CLEANUP_CRON = "17 3 * * *"     # nightly, off the hour to avoid every cron firing together
+JOB_RETENTION_HOURS = 24 * 30   # a month of finished jobs is plenty; `event` is the audit trail
 
 
 async def execute_instance_wakeup(instance_id: str, wake_token: str) -> None:
@@ -43,6 +46,18 @@ async def execute_instance_wakeup(instance_id: str, wake_token: str) -> None:
 
     result = await get_runtime().engine.run_wakeup(uuid.UUID(instance_id), wake_token)
     log.info("wakeup %s -> %s", instance_id, result)
+
+
+async def prune_finished_jobs(timestamp: int | None = None) -> None:
+    """Finished jobs and their status events accumulate forever otherwise: at a
+    thousand outreach attempts a day that is millions of rows a year of pure
+    bookkeeping. Never touches our own `event` table, which is the audit trail
+    people actually read."""
+    from app.runtime import get_runtime
+
+    manager = get_runtime().procrastinate_app.job_manager
+    await manager.delete_old_jobs(nb_hours=JOB_RETENTION_HOURS, include_cancelled=True)
+    log.info("pruned procrastinate jobs finished more than %sh ago", JOB_RETENTION_HOURS)
 
 
 async def recover_lost_wakes(timestamp: int | None = None) -> None:
@@ -64,6 +79,9 @@ def make_procrastinate_app(psycopg_url: str) -> procrastinate.App:
     app.task(name=TASK_NAME)(execute_instance_wakeup)
     app.periodic(cron=RECOVERY_CRON, queueing_lock="hc:recovery")(
         app.task(name=RECOVERY_TASK_NAME, pass_context=False)(recover_lost_wakes)
+    )
+    app.periodic(cron=CLEANUP_CRON, queueing_lock="hc:cleanup")(
+        app.task(name=CLEANUP_TASK_NAME, pass_context=False)(prune_finished_jobs)
     )
     return app
 

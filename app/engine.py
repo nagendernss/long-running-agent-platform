@@ -102,7 +102,7 @@ class EngineContext:
 
     async def schedule_wake_in(self, instance: WorkflowInstance, duration: str, reason: str) -> None:
         contact = await self.engine._target_contact(self.session, instance)
-        at = apply_scheduling_constraints(self.now + parse_duration(duration), contact)
+        at = apply_scheduling_constraints(self.now + parse_duration(duration), contact, key=str(instance.id))
         await self.schedule_wake(instance, at, reason)
 
     async def transition(self, instance: WorkflowInstance, new_state: str) -> None:
@@ -367,7 +367,7 @@ class Engine:
 
         if isinstance(signal, Reschedule):
             contact = await self._target_contact(session, instance)
-            at = apply_scheduling_constraints(now + parse_duration(signal.wait_duration), contact)
+            at = apply_scheduling_constraints(now + parse_duration(signal.wait_duration), contact, key=str(instance.id))
             instance.attempt_count = 0
             await self.scheduler.schedule_wake(session, instance, at, reason="dynamic_reschedule")
             await ctx.log(instance, "outcome_recorded", {"outcome": "reschedule", "wait": signal.wait_duration, "at": at.isoformat()})
@@ -387,7 +387,7 @@ class Engine:
                 )
             else:
                 contact = await self._target_contact(session, instance)
-                at = apply_scheduling_constraints(now + delay, contact)
+                at = apply_scheduling_constraints(now + delay, contact, key=str(instance.id))
                 instance.attempt_count += 1
                 await self.scheduler.schedule_wake(session, instance, at, reason="retry")
                 await ctx.log(

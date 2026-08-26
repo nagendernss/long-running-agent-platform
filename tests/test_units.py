@@ -121,3 +121,47 @@ async def test_attempt_idempotency_key(rt, seed):
         key = f"{inst.id}:{uuid.uuid4().hex}"
         assert await rt.engine._run_attempt(s, inst, key=key, reason="t") is True
         assert await rt.engine._run_attempt(s, inst, key=key, reason="t") is False
+
+
+def test_clamped_wakes_are_spread_so_the_day_does_not_open_with_one_burst():
+    """Everything due overnight or over a weekend clamps to the same instant. At a
+    thousand attempts a day that is hundreds of calls fired on one second, which the
+    phone provider and the LLM will both rate-limit."""
+    from app.scheduling.constraints import DEFAULT_SPREAD
+
+    contact = Contact(name="x", role="provider", timezone="America/New_York",
+                      business_hours={"start": "09:00", "end": "17:00"})
+    friday_evening = datetime(2026, 1, 9, 23, 0, tzinfo=timezone.utc)  # 18:00 ET Friday
+
+    times = [apply_scheduling_constraints(friday_evening, contact, key=f"instance-{i}") for i in range(50)]
+    monday_open = datetime(2026, 1, 12, 14, 0, tzinfo=timezone.utc)     # 09:00 ET Monday
+
+    assert len(set(times)) > 40, "50 instances must not land on a handful of instants"
+    assert all(monday_open <= t < monday_open + DEFAULT_SPREAD for t in times), "and all inside the window"
+
+
+def test_the_spread_is_stable_for_one_instance():
+    """A wake recomputed twice must not hop around, or a matter would keep losing its
+    place whenever anything rescheduled it."""
+    contact = Contact(name="x", role="provider", timezone="America/New_York",
+                      business_hours={"start": "09:00", "end": "17:00"})
+    raw = datetime(2026, 1, 9, 23, 0, tzinfo=timezone.utc)
+    assert apply_scheduling_constraints(raw, contact, key="abc") == apply_scheduling_constraints(raw, contact, key="abc")
+    assert apply_scheduling_constraints(raw, contact, key="abc") != apply_scheduling_constraints(raw, contact, key="xyz")
+
+
+def test_a_time_already_inside_business_hours_is_left_exactly_alone():
+    """Only the pile-up at the window boundary is spread; a time the caller chose
+    precisely is honoured."""
+    contact = Contact(name="x", role="provider", timezone="America/New_York",
+                      business_hours={"start": "09:00", "end": "17:00"})
+    inside = datetime(2026, 1, 6, 15, 30, tzinfo=timezone.utc)
+    assert apply_scheduling_constraints(inside, contact, key="anything") == inside
+
+
+def test_maintenance_tasks_are_registered_to_run_on_their_own(rt):
+    from app.scheduling.scheduler import CLEANUP_CRON, CLEANUP_TASK_NAME, RECOVERY_CRON, RECOVERY_TASK_NAME
+
+    periodic = {p.task.name: p.cron for p in rt.procrastinate_app.periodic_registry.periodic_tasks.values()}
+    assert periodic.get(RECOVERY_TASK_NAME) == RECOVERY_CRON
+    assert periodic.get(CLEANUP_TASK_NAME) == CLEANUP_CRON, "finished jobs must be pruned or the queue grows forever"
