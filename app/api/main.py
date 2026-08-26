@@ -12,6 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +21,7 @@ from app.api.timeline import build_rounds
 from app.clock import OffsetClock, parse_duration
 from app.events import list_events
 from app.review import list_pending_review_tasks
+from app.workflows.types import list_types, upsert_type
 from app.runtime import Runtime, build_runtime, ensure_schema, get_runtime
 from app.config import get_settings
 
@@ -68,6 +70,28 @@ class InboundIn(BaseModel):
     channel: str = "sms"
 
 
+class WorkflowTypeIn(BaseModel):
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")
+    template: str = "outreach"
+    description: str | None = None
+    spec: dict[str, Any] = Field(default_factory=dict)
+
+
+class NewAgentIn(BaseModel):
+    """Start an agent, entering the contact here rather than needing one to exist."""
+
+    workflow_type: str
+    contact_name: str
+    phone: str | None = None
+    email: str | None = None
+    timezone: str = "America/New_York"
+    business_start: str = "09:00"
+    business_end: str = "17:00"
+    role: str = "client"
+    matter_type: str | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
 class AdvanceIn(BaseModel):
     duration: str | None = None      # "2h", "14d" - omit to jump to the next due wake
     run_due: bool = True
@@ -104,6 +128,93 @@ async def api_workflows(runtime: Runtime = Depends(rt)):
         }
         for wt in runtime.registry.types()
     }
+
+
+def _first_line(text: str | None) -> str:
+    return (text or "").strip().splitlines()[0] if (text or "").strip() else ""
+
+
+@app.get("/api/workflow-types")
+async def api_workflow_types(s: AsyncSession = Depends(session), runtime: Runtime = Depends(rt)):
+    """Every type the platform can run: code-defined ones and the rows people built."""
+    rows = {r.name: r for r in await list_types(s)}
+    out = []
+    for name in runtime.registry.types():
+        row = rows.get(name)
+        definition = runtime.registry.get(name)
+        out.append({
+            "name": name,
+            "kind": "code" if runtime.registry.is_code_defined(name) else "template",
+            "template": row.template if row else None,
+            "description": row.description if row else _first_line(definition.__doc__),
+            "spec": row.spec if row else None,
+            "editable": row is not None,
+            "retry_policy": definition.retry_policy,
+        })
+    return out
+
+
+@app.post("/api/workflow-types", status_code=201)
+async def api_create_workflow_type(body: WorkflowTypeIn, runtime: Runtime = Depends(rt)):
+    if runtime.registry.is_code_defined(body.name):
+        raise HTTPException(409, f"{body.name} is defined in code and cannot be edited here")
+    async with runtime.session_factory() as s, s.begin():
+        try:
+            row = await upsert_type(
+                s, name=body.name, template=body.template, spec=body.spec,
+                description=body.description, now=runtime.clock.now(),
+            )
+        except KeyError as exc:
+            raise HTTPException(400, str(exc)) from None
+        except PydanticValidationError as exc:
+            # pydantic puts the original exception in ctx, which will not serialise -
+            # the person filling in the form wants the sentence anyway.
+            raise HTTPException(422, [
+                {"field": ".".join(str(p) for p in e["loc"]) or "spec", "message": e["msg"]}
+                for e in exc.errors(include_url=False)
+            ]) from None
+        await runtime.registry.reload(s)   # the builder should feel instant
+        return {"name": row.name, "template": row.template, "spec": row.spec}
+
+
+@app.post("/api/agents", status_code=201)
+async def api_start_agent(body: NewAgentIn, runtime: Runtime = Depends(rt)):
+    """Create the contact (and a case if a matter type is given), then start one
+    instance pointed at it."""
+    async with runtime.session_factory() as s, s.begin():
+        await runtime.registry.ensure_fresh(s)
+        if body.workflow_type not in runtime.registry.types():
+            raise HTTPException(400, f"unknown workflow_type: {body.workflow_type}")
+        if not (body.phone or body.email):
+            raise HTTPException(422, "a contact needs a phone number or an email address")
+
+        now = runtime.clock.now()
+        contact = Contact(
+            id=uuid.uuid4(), name=body.contact_name, role=body.role, phone=body.phone or None,
+            email=body.email or None, timezone=body.timezone,
+            business_hours={"start": body.business_start, "end": body.business_end}, created_at=now,
+        )
+        s.add(contact)
+        await s.flush()
+
+        case = None
+        if body.matter_type:
+            case = CaseRecord(id=uuid.uuid4(), client_contact_id=contact.id,
+                              matter_type=body.matter_type, created_at=now)
+            s.add(case)
+            await s.flush()
+
+        definition = runtime.registry.get(body.workflow_type)
+        recipient_key = getattr(getattr(definition, "spec", None), "recipient_key", "target_contact_id")
+        context = {
+            "target_contact_id": str(contact.id),
+            recipient_key: str(contact.id),
+            **body.context,
+        }
+        instance = await runtime.engine.start_instance(
+            s, body.workflow_type, case_id=case.id if case else None, context=context
+        )
+        return {**instance_json(instance), "contact_id": str(contact.id)}
 
 
 @app.get("/api/instances")
@@ -297,6 +408,107 @@ async def dashboard(request: Request, s: AsyncSession = Depends(session), runtim
          "clock": clock_state(runtime), "ladders": ladder_sizes(runtime),
          "options": await resolution_options(runtime, s, reviews)},
     )
+
+
+def _form_error(exc: Exception) -> str:
+    """One readable sentence for the page, not a stack of pydantic internals."""
+    if isinstance(exc, PydanticValidationError):
+        first = exc.errors(include_url=False)[0]
+        field = ".".join(str(p) for p in first["loc"]) or "input"
+        return f"{field}: {first['msg']}"
+    return str(exc)
+
+
+def _parse_pairs(text: str) -> dict[str, str]:
+    """"date = March 3rd, message = Your hearing moved" -> a context dict. Deliberately
+    forgiving: this is typed by a person, not a machine."""
+    pairs: dict[str, str] = {}
+    for chunk in (text or "").split(","):
+        if "=" in chunk:
+            key, _, value = chunk.partition("=")
+            if key.strip():
+                pairs[key.strip()] = value.strip()
+    return pairs
+
+
+def _spec_from_form(form) -> dict[str, Any]:
+    keywords = [k.strip() for k in (form.get("escalate_keywords") or "").split(",") if k.strip()]
+    spec: dict[str, Any] = {
+        "message": form.get("message") or "",
+        "channel": form.get("channel") or "sms",
+        "retry_count": int(form.get("retry_count") or 0),
+        "retry_interval_days": int(form.get("retry_interval_days") or 2),
+        "response_deadline_days": int(form.get("response_deadline_days") or 2),
+        "on_reply": form.get("on_reply") or "complete",
+        "escalate_keywords": keywords,
+    }
+    if spec["on_reply"] == "repeat":
+        spec["repeat_every_days"] = int(form.get("repeat_every_days") or 14)
+    return spec
+
+
+@app.get("/workflows", response_class=HTMLResponse)
+async def workflows_page(request: Request, edit: str | None = None,
+                         s: AsyncSession = Depends(session), runtime: Runtime = Depends(rt)):
+    types = await api_workflow_types(s, runtime)
+    editing = next((t for t in types if t["name"] == edit and t["editable"]), None)
+    return TEMPLATES.TemplateResponse(
+        request, "workflows.html",
+        {"types": types, "editing": editing, "spec": (editing or {}).get("spec") or {},
+         "clock": clock_state(runtime), "error": request.query_params.get("error")},
+    )
+
+
+@app.post("/workflows")
+async def workflows_create(request: Request, runtime: Runtime = Depends(rt)):
+    form = await request.form()
+    try:  # a form must never 500 on what someone typed
+        body = WorkflowTypeIn(
+            name=(form.get("name") or "").strip(), template="outreach",
+            description=(form.get("description") or "").strip() or None, spec=_spec_from_form(form),
+        )
+    except (PydanticValidationError, ValueError) as exc:
+        return RedirectResponse(f"/workflows?error={_form_error(exc)}", status_code=303)
+    try:
+        await api_create_workflow_type(body, runtime)
+    except HTTPException as exc:
+        return RedirectResponse(f"/workflows?error={exc.detail}", status_code=303)
+    return RedirectResponse("/workflows", status_code=303)
+
+
+@app.get("/instances/new", response_class=HTMLResponse)
+async def new_instance_page(request: Request, workflow_type: str | None = None,
+                            s: AsyncSession = Depends(session), runtime: Runtime = Depends(rt)):
+    return TEMPLATES.TemplateResponse(
+        request, "new_instance.html",
+        {"types": await api_workflow_types(s, runtime), "selected": workflow_type,
+         "clock": clock_state(runtime), "error": request.query_params.get("error")},
+    )
+
+
+@app.post("/instances/new")
+async def new_instance_create(request: Request, runtime: Runtime = Depends(rt)):
+    form = await request.form()
+    try:
+        body = NewAgentIn(
+            workflow_type=form.get("workflow_type") or "",
+            contact_name=(form.get("contact_name") or "").strip(),
+            phone=(form.get("phone") or "").strip() or None,
+            email=(form.get("email") or "").strip() or None,
+            timezone=form.get("timezone") or "America/New_York",
+            business_start=form.get("business_start") or "09:00",
+            business_end=form.get("business_end") or "17:00",
+            role=form.get("role") or "client",
+            matter_type=(form.get("matter_type") or "").strip() or None,
+            context=_parse_pairs(form.get("context_pairs") or ""),
+        )
+    except (PydanticValidationError, ValueError) as exc:
+        return RedirectResponse(f"/instances/new?error={_form_error(exc)}", status_code=303)
+    try:
+        created = await api_start_agent(body, runtime)
+    except HTTPException as exc:
+        return RedirectResponse(f"/instances/new?error={exc.detail}", status_code=303)
+    return RedirectResponse(f"/instances/{created['id']}", status_code=303)
 
 
 @app.get("/instances/{instance_id}", response_class=HTMLResponse)

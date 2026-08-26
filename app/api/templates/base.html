@@ -57,6 +57,20 @@
              padding:4px 6px; font-size:12px; }
     form.reply { display:flex; gap:8px; margin-top:8px; }
     form.reply input[type=text] { flex:1; }
+    form.builder { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+                   padding:16px 18px; max-width:900px; }
+    form.builder h3 { font-size:11px; text-transform:uppercase; letter-spacing:.08em;
+                      color:var(--dim); margin:18px 0 8px; font-weight:600; }
+    form.builder .row { display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; margin-bottom:12px; }
+    form.builder label { display:flex; flex-direction:column; gap:4px; font-size:11px;
+                         text-transform:uppercase; letter-spacing:.05em; color:var(--dim); }
+    form.builder label.wide { display:block; margin-bottom:4px; }
+    form.builder label.wide input { width:100%; margin-top:4px; }
+    form.builder label.radio { flex-direction:row; align-items:center; gap:6px; text-transform:none;
+                               letter-spacing:0; font-size:13px; color:var(--fg); }
+    form.builder input[type=number] { width:70px; }
+    form.builder .hint { font-size:11px; margin:2px 0 10px; }
+    form.builder button { padding:6px 14px; }
     button.outcome { border-color:var(--active); color:var(--active); margin:0 4px 6px 0; }
     button.outcome:hover { background:#12211a; }
 
@@ -134,7 +148,8 @@
 <body>
   <header>
     <h1><a href="/">HelloCounsel Agent Platform</a></h1>
-    <span class="dim">long-running agent workflows &middot; engine is workflow-agnostic</span>
+    <span class="dim"><a href="/">instances</a> &middot; <a href="/workflows">workflow types</a>
+      &middot; <a href="/instances/new">start an agent</a></span>
     {% if clock and clock.time_travel %}
     <div class="tt">
       <span class="tt-now" title="the clock this server schedules against">{{ clock.now[:16].replace('T', ' ') }}</span>

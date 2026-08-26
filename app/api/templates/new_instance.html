@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Start an agent</h2>
+<form method="post" action="/instances/new" class="builder">
+  <div class="row">
+    <label>Workflow
+      <select name="workflow_type">
+        {% for t in types %}
+        <option value="{{ t.name }}" {{ 'selected' if t.name == selected else '' }}>{{ t.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Matter type<input type="text" name="matter_type" placeholder="personal_injury (optional)"></label>
+  </div>
+
+  <h3>Who it contacts</h3>
+  <div class="row">
+    <label>Name<input type="text" name="contact_name" required placeholder="Jane Okafor"></label>
+    <label>Phone<input type="text" name="phone" placeholder="+15550101"></label>
+    <label>Email<input type="text" name="email" placeholder="jane@example.com"></label>
+  </div>
+  <div class="row">
+    <label>They are a
+      <select name="role">
+        {% for r in ['client', 'provider', 'staff'] %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Timezone
+      <select name="timezone">
+        {% for z in ['America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'Europe/London', 'Asia/Kolkata'] %}
+        <option value="{{ z }}">{{ z }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Reachable<input type="text" name="business_start" value="09:00" size="5"> to
+           <input type="text" name="business_end" value="17:00" size="5"></label>
+  </div>
+  <p class="dim hint">A phone number or an email address &mdash; whichever the workflow sends on.
+     Outreach is only scheduled inside these hours, in their timezone.</p>
+
+  <h3>This agent's details</h3>
+  <label class="wide">Values for the message
+    <input type="text" name="context_pairs" placeholder="date = March 3rd, message = Your hearing moved">
+  </label>
+  <p class="dim hint">Comma-separated <code>name = value</code> pairs, filling the
+     {% raw %}{placeholders}{% endraw %} in this workflow's message.</p>
+
+  <div class="row"><button type="submit">Start agent</button> <a class="dim" href="/">cancel</a></div>
+</form>
+{% if error %}<div class="empty" style="border-color:var(--blocked);color:var(--blocked)">{{ error }}</div>{% endif %}
+{% endblock %}

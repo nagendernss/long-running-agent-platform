@@ -237,33 +237,60 @@ which matters because the fallback is exactly what runs during a provider outage
 
 ---
 
-## Adding workflow #3
+## Adding a workflow
 
-One file + one line:
+Two ways in, and the first one covers most of the work.
 
-```python
-# app/workflows/court_deadline.py
-class CourtDeadlineWorkflow(BaseWorkflow):
-    workflow_type = "court_deadline_confirmation"
-    initial_state = "awaiting_confirmation"
-    retry_policy = {"no_answer": {"schedule": ["1d", "3d"]}}
-    domain_signals = [DeadlineConfirmed]
-    keyword_rules = [rule("deadline_confirmed", r"...", lambda m, t, c: DeadlineConfirmed())]
+### 1. Build it from a form (no deploy)
 
-    async def on_wake(self, instance, ctx): ...
-    async def handle_domain_signal(self, instance, signal, ctx): ...
+Most outreach is the same machine: send to one contact, wait, chase on a ladder,
+hand off to a human. That shape is the **outreach template**, and a workflow type is
+a row configuring it - created at `/workflows`:
+
+```
+name              [ deposition_reminder      ]
+message           [ Hi {contact_name}, reminding you about your deposition on {date}. ]
+send by           [ sms ▾ ]
+chase             [ 2 ] times, waiting [ 3 ] days between
+give up after     [ 1 ] day of silence
+on reply          (•) finish   ( ) repeat every [ 14 ] days
+hand to a human if the reply mentions [ angry, complaint ]
 ```
 
-```python
-# app/workflows/registry.py
-registry.register(CourtDeadlineWorkflow())
+`on reply` is the entire difference between the two workflows that shipped first:
+`client_checkin` repeats every 14 days, `contact_update` finishes. Both are now rows,
+seeded by `migrations/002_workflow_type.sql` - the Python modules are gone.
+
+Then start one at `/instances/new`, entering the contact there:
+
+```
+workflow   [ deposition_reminder ▾ ]
+contact    name [ Dana Reed ]  phone [ +15550999 ]  timezone [ America/Chicago ▾ ]
+           reachable [ 09:00 ] to [ 17:00 ]
+details    date = March 3rd
 ```
 
-It gets retries, business-hours clamping, durable wake-ups, fact write-back, the
-review queue, the audit trail, the API and the dashboard for free. Workflows reach
-the platform only through `WorkflowContext` (`send`, `schedule_wake_in`,
-`transition`, `complete`, `create_review_task`, `log`, `contact_field`) — they never
-touch the DB, scheduler or channels directly.
+`{contact_name}` is filled in at send time; any other `{placeholder}` comes from those
+`name = value` pairs, so one type serves many agents.
+
+### 2. Write a template (a deploy)
+
+Only when the shape itself is new - several parties, or side effects that differ per
+signal. `medical_records_followup` is the example: it chases a provider, keeps the
+client informed, and handles authorisations and fees. That stays a Python class of
+about 140 lines, registered in `app/workflows/registry.py`:
+
+```python
+registry.register(MedicalRecordsFollowupWorkflow())
+```
+
+A new *template* (rather than a new type) is the same move: implement
+`WorkflowDefinition`, parameterise it with a Pydantic spec, add it to `TEMPLATES`, and
+every type built on it becomes a form.
+
+Either way the workflow inherits retries, business-hours clamping, durable fenced
+wakes, fact write-back, channel switching, the review queue, the API and the dashboard
+- and the engine does not change.
 
 ---
 
@@ -286,9 +313,11 @@ touch the DB, scheduler or channels directly.
 
 ## Out of scope in this slice (and where it would attach)
 
-- **Visual workflow builder.** Not built. The manifest shape (states + declarative
-  retry policy + domain signal handlers) is what a canvas would emit; moving from
-  Python classes to YAML is a loader change behind `WorkflowRegistry`, nothing else.
+- **A node canvas.** The builder is a form over a template, not free-form states. A
+  canvas would need the states themselves to become data and the engine to gain an
+  interpreter; the `workflow_type` row is the shape it would emit.
+- **Spec versioning.** Editing a type changes what its in-flight instances do at their
+  next step. Flagged in the UI, not solved.
 - **Full human-in-the-loop.** `review_task` rows, creation, listing and a minimal
   resolve path exist. Routing rules, assignment, SLAs and escalation ladders are
   **not** built — they belong in `app/review.py` and would not touch the Engine.

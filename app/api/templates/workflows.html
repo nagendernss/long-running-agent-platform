@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Workflow types &mdash; {{ types|length }}</h2>
+<table>
+  <tr><th>Name</th><th>Defined</th><th>What it does</th><th>Chases</th><th></th></tr>
+  {% for t in types %}
+  <tr>
+    <td class="mono">{{ t.name }}</td>
+    <td>
+      {% if t.kind == 'code' %}<span class="pill" title="A Python class - several parties or per-signal side effects">code</span>
+      {% else %}<span class="pill active" title="Built here from a template">{{ t.template }}</span>{% endif %}
+    </td>
+    <td class="dim">{{ t.description or '' }}</td>
+    <td class="mono dim">
+      {% set ladder = t.retry_policy.get('no_answer', {}).get('schedule', []) %}
+      {{ ladder|join(', ') if ladder else 'no retries' }}
+    </td>
+    <td>
+      <a href="/instances/new?workflow_type={{ t.name }}">start an agent</a>
+      {% if t.editable %} &middot; <a href="/workflows?edit={{ t.name }}">edit</a>{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h2>{{ 'Edit ' + editing.name if editing else 'New workflow type' }}</h2>
+<form method="post" action="/workflows" class="builder">
+  <div class="row">
+    <label>Name<input type="text" name="name" value="{{ editing.name if editing else '' }}"
+           {{ 'readonly' if editing else '' }} placeholder="deposition_reminder" required
+           pattern="[a-z0-9_]+" title="lowercase letters, numbers and underscores"></label>
+    <label>What it does<input type="text" name="description" value="{{ editing.description or '' if editing else '' }}"
+           placeholder="Remind a witness about their deposition"></label>
+  </div>
+
+  <label class="wide">Message
+    <input type="text" name="message" required value="{{ spec.message or '' }}"
+           placeholder="Hi {contact_name}, …">
+  </label>
+  <p class="dim hint">{% raw %}{contact_name}{% endraw %} is filled in when it sends. Any other
+     {% raw %}{placeholder}{% endraw %} comes from what you enter when starting an agent.</p>
+
+  <div class="row">
+    <label>Send by
+      <select name="channel">
+        {% for c in ['sms', 'call', 'email'] %}
+        <option value="{{ c }}" {{ 'selected' if spec.channel == c else '' }}>{{ c }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Chase<input type="number" name="retry_count" min="0" max="10"
+           value="{{ spec.retry_count if spec.retry_count is not none else 2 }}"> times</label>
+    <label>Waiting<input type="number" name="retry_interval_days" min="1" max="90"
+           value="{{ spec.retry_interval_days if spec.retry_interval_days is not none else 2 }}"> days between</label>
+    <label>Give up after<input type="number" name="response_deadline_days" min="1" max="90"
+           value="{{ spec.response_deadline_days if spec.response_deadline_days is not none else 2 }}"> days of silence</label>
+  </div>
+
+  <div class="row">
+    <label class="radio"><input type="radio" name="on_reply" value="complete"
+           {{ 'checked' if spec.on_reply != 'repeat' else '' }}> finish when they reply</label>
+    <label class="radio"><input type="radio" name="on_reply" value="repeat"
+           {{ 'checked' if spec.on_reply == 'repeat' else '' }}> repeat every</label>
+    <label><input type="number" name="repeat_every_days" min="1" max="365"
+           value="{{ spec.repeat_every_days or 14 }}"> days</label>
+  </div>
+
+  <label class="wide">Hand to a human if the reply mentions
+    <input type="text" name="escalate_keywords" value="{{ (spec.escalate_keywords or [])|join(', ') }}"
+           placeholder="pain, hospital, another lawyer">
+  </label>
+
+  <div class="row">
+    <button type="submit">{{ 'Save changes' if editing else 'Create workflow type' }}</button>
+    {% if editing %}<a class="dim" href="/workflows">cancel</a>{% endif %}
+  </div>
+  {% if editing %}<p class="dim hint">Editing changes what <em>new</em> instances do. Instances already
+     running keep going under the spec they started with only until their next step &mdash; they read this
+     type each time they act.</p>{% endif %}
+</form>
+{% if error %}<div class="empty" style="border-color:var(--blocked);color:var(--blocked)">{{ error }}</div>{% endif %}
+{% endblock %}
