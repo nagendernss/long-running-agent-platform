@@ -26,9 +26,11 @@ class WorkflowRegistry:
 
 def default_registry() -> WorkflowRegistry:
     from app.workflows.client_checkin import ClientCheckinWorkflow
+    from app.workflows.contact_update import ContactUpdateWorkflow
     from app.workflows.medical_records import MedicalRecordsFollowupWorkflow
 
     registry = WorkflowRegistry()
     registry.register(MedicalRecordsFollowupWorkflow())
     registry.register(ClientCheckinWorkflow())
+    registry.register(ContactUpdateWorkflow())   # <- the whole cost of a new use case
     return registry

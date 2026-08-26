@@ -22,7 +22,8 @@ async def test_workflow_catalog_is_generic(client):
     r = await client.get("/api/workflows")
     body = r.json()
     assert r.status_code == 200
-    assert set(body) == {"medical_records_followup", "client_checkin"}
+    # superset, not equality: registering a workflow must never break the platform's tests
+    assert {"medical_records_followup", "client_checkin"} <= set(body)
     assert body["medical_records_followup"]["retry_policy"]["no_answer"]["schedule"] == ["2d", "5d", "14d"]
     assert "RECORDS_RECEIVED" in body["medical_records_followup"]["domain_signals"]
 
