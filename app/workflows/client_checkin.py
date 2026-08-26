@@ -38,6 +38,9 @@ class ClientCheckinWorkflow(BaseWorkflow):
     initial_state: ClassVar[str] = "scheduled"
     retry_policy: ClassVar[dict[str, Any]] = {"no_answer": {"schedule": ["1d", "3d"]}, "cadence": "14d"}
     response_deadline: ClassVar[str | None] = "2d"
+    resolution_options: ClassVar[list[dict[str, str]]] = [
+        {"action": "spoke_to_client", "label": "spoke to client"},
+    ]
     domain_signals: ClassVar[list[type[Signal]]] = [ClientFlag, CheckinOk]
     keyword_rules: ClassVar[list[KeywordRule]] = [
         rule(
@@ -78,3 +81,13 @@ class ClientCheckinWorkflow(BaseWorkflow):
     async def on_generic_outcome(self, instance: WorkflowInstance, signal: Signal, ctx: WorkflowContext) -> None:
         if signal.type == "RESCHEDULE":
             await ctx.transition(instance, "scheduled")
+
+    async def on_review_resolved(self, instance, task, ctx) -> None:
+        """A team member handled it personally - drop back onto the normal cadence
+        rather than starting the chase again."""
+        if (task.resolution or {}).get("action") == "spoke_to_client":
+            instance.attempt_count = 0
+            await ctx.transition(instance, "scheduled")
+            await ctx.schedule_wake_in(instance, self.retry_policy["cadence"], reason="cadence")
+        else:
+            await super().on_review_resolved(instance, task, ctx)

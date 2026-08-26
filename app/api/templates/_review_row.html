@@ -33,6 +33,13 @@
       </form>
     {% endif %}
 
+    {% for opt in (options.get(t.id|string) or []) %}
+    <form class="inline" method="post" action="/review-queue/{{ t.id }}/resolve">
+      <input type="hidden" name="action" value="{{ opt.action }}">
+      <button type="submit" class="outcome" title="Record what actually happened and finish this step">{{ opt.label }}</button>
+    </form>
+    {% endfor %}
+
     <form method="post" action="/review-queue/{{ t.id }}/resolve" class="resolve">
       <input type="hidden" name="action" value="retry">
       <select name="channel" title="Stored as this contact's preferred channel, then outreach resumes">

@@ -332,3 +332,53 @@ async def test_reply_box_drives_an_instance_from_the_page(client, rt, seed):
     inst = (await client.get(f"/api/instances/{iid}")).json()
     assert inst["context"]["pending_requirement"]["action_type"] == "payment"
     assert inst["status"] == "blocked"
+
+
+async def test_a_reviewer_can_record_the_real_outcome(client, rt, seed):
+    """Reported: a provider replied "here are your details", the brain called it
+    ambiguous and escalated, and the queue only offered retry or close - neither of
+    which means "the records arrived". Workflows now declare their own outcomes."""
+    r = await client.post(
+        "/api/instances",
+        json={"workflow_type": "medical_records_followup", "case_id": str(seed.case_id), "context": medical_context(seed)},
+    )
+    iid = r.json()["id"]
+    await client.post("/api/simulate/inbound", json={"instance_id": iid, "text": "asdf ???"})  # -> NEEDS_HUMAN
+    task = next(t for t in (await client.get("/api/review-queue")).json() if t["instance_id"] == iid)
+    assert {o["action"] for o in task["resolution_options"]} == {"records_received", "auth_obtained"}
+
+    page = (await client.get("/")).text
+    assert "records received" in page
+
+    rt.channel.outbox.clear()
+    r = await client.post(f"/review-queue/{task['id']}/resolve", data={"action": "records_received"})
+    assert r.status_code == 303
+
+    inst = (await client.get(f"/api/instances/{iid}")).json()
+    assert inst["status"] == "completed" and inst["state"] == "completed"
+    assert "sent your medical records" in rt.channel.outbox[-1].body, "the client is told, same as the signal path"
+
+
+async def test_resolving_writes_one_wake_scheduled_not_two(client, rt, seed):
+    """Resolving used to log the same wake twice: the resolution armed it and the
+    unblock re-armed it."""
+    from app.signals import ActionRequired
+
+    r = await client.post(
+        "/api/instances",
+        json={"workflow_type": "medical_records_followup", "case_id": str(seed.case_id), "context": medical_context(seed)},
+    )
+    iid = r.json()["id"]
+    async with rt.session_factory() as s, s.begin():
+        inst = await rt.engine._lock_instance(s, iid)
+        await rt.engine.advance_instance(s, inst, [ActionRequired(
+            action_type="payment", summary="$45 fee", details={"amount": "$45"}, confidence=0.95, evidence="fee",
+        )])
+    task = next(t for t in (await client.get("/api/review-queue")).json() if t["instance_id"] == iid)
+
+    before = len([e for e in (await client.get(f"/api/instances/{iid}")).json()["timeline"]
+                  if e["type"] == "wake_scheduled"])
+    await client.post(f"/review-queue/{task['id']}/resolve", data={"action": "completed", "reference": "chk-7"})
+    after = [e for e in (await client.get(f"/api/instances/{iid}")).json()["timeline"] if e["type"] == "wake_scheduled"]
+    assert len(after) == before + 1
+    assert after[-1]["payload"]["reason"] == "resume_after_requirement"

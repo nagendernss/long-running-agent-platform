@@ -515,6 +515,7 @@ class Engine:
             select(func.count()).select_from(ReviewTask).where(ReviewTask.instance_id == instance.id, ReviewTask.status == "pending")
         )
         was_blocked = instance.status == "blocked"
+        token_before = instance.wake_token
         if was_blocked and not pending:
             instance.status = "active"
         instance.updated_at = now
@@ -525,17 +526,24 @@ class Engine:
         await self._apply_resolution_channel(session, instance, resolution, review_event.id, now)
         await self._complete_pending_requirement(session, instance, resolution, resolved_by, now)
         await self.definition_for(instance).on_review_resolved(instance, task, self.ctx(session))
-        await self._rearm_wake_if_unblocked(session, instance, was_blocked, now)
+        await self._rearm_wake_if_unblocked(session, instance, was_blocked, token_before, now)
         await session.flush()
         return task
 
     async def _rearm_wake_if_unblocked(
-        self, session: AsyncSession, instance: WorkflowInstance, was_blocked: bool, now: datetime
+        self, session: AsyncSession, instance: WorkflowInstance, was_blocked: bool,
+        token_before: str | None, now: datetime,
     ) -> None:
         """A wake scheduled while the instance was blocked has a durable job that fires
         into `skipped:status=blocked` and is then gone. Once the last review task
-        clears, re-issue the job so recovery does not depend on the poller."""
+        clears, re-issue the job so recovery does not depend on the poller.
+
+        Skipped when this resolution already scheduled one - the fencing token changing
+        is the tell - so resolving does not write two identical wake_scheduled events.
+        """
         if not was_blocked or instance.status != "active" or instance.next_wake_at is None:
             return
+        if instance.wake_token != token_before:
+            return  # something in this resolution already armed a fresh wake
         at = max(instance.next_wake_at, now) if instance.next_wake_at < now else instance.next_wake_at
         await self.scheduler.schedule_wake(session, instance, at, reason=instance.wake_reason or "resume_after_review")

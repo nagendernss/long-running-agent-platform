@@ -34,6 +34,9 @@ class ContactUpdateWorkflow(BaseWorkflow):
     initial_state: ClassVar[str] = "awaiting_ack"
     retry_policy: ClassVar[dict[str, Any]] = {"no_answer": {"schedule": ["1d", "3d"]}}
     response_deadline: ClassVar[str | None] = "2d"
+    resolution_options: ClassVar[list[dict[str, str]]] = [
+        {"action": "acknowledged", "label": "they confirmed"},
+    ]
     domain_signals: ClassVar[list[type[Signal]]] = [Acknowledged]
     keyword_rules: ClassVar[list[KeywordRule]] = [
         rule(
@@ -53,6 +56,12 @@ class ContactUpdateWorkflow(BaseWorkflow):
         if c.get("reminder") and not c.get("reminded"):
             instance.context = {**c, "reminded": True}
             await ctx.schedule_wake_in(instance, c["reminder"], reason="reminder")
+
+    async def on_review_resolved(self, instance, task, ctx) -> None:
+        if (task.resolution or {}).get("action") == "acknowledged":
+            await ctx.complete(instance, outcome="acknowledged")
+        else:
+            await super().on_review_resolved(instance, task, ctx)
 
     async def handle_domain_signal(self, instance: WorkflowInstance, signal: Signal, ctx: WorkflowContext) -> None:
         if isinstance(signal, Acknowledged):

@@ -21,7 +21,9 @@ from app.workflows.base import BaseWorkflow, WorkflowContext
 
 # --- domain signals (only this workflow ever sees these) ---------------------------
 class RecordsReceived(Signal):
-    """The provider says the records have been sent, faxed, mailed, uploaded or attached."""
+    """The provider says the records have been sent, faxed, mailed, uploaded or attached.
+    Includes the shorthands people actually use: "PFA", "please find attached",
+    "attached herewith", "here you go", "sending them over"."""
 
     type: Literal["RECORDS_RECEIVED"] = "RECORDS_RECEIVED"
 
@@ -50,6 +52,10 @@ class MedicalRecordsFollowupWorkflow(BaseWorkflow):
     initial_state: ClassVar[str] = "awaiting_reply"
     retry_policy: ClassVar[dict[str, Any]] = {"no_answer": {"schedule": ["2d", "5d", "14d"]}}
     response_deadline: ClassVar[str | None] = "3d"
+    resolution_options: ClassVar[list[dict[str, str]]] = [
+        {"action": "records_received", "label": "records received"},
+        {"action": "auth_obtained", "label": "authorization signed"},
+    ]
     domain_signals: ClassVar[list[type[Signal]]] = [RecordsReceived, AuthRequired, RequestDenied]
     keyword_rules: ClassVar[list[KeywordRule]] = [
         rule(
@@ -137,9 +143,20 @@ class MedicalRecordsFollowupWorkflow(BaseWorkflow):
     # -- staff resolutions ---------------------------------------------------------
     async def on_review_resolved(self, instance: WorkflowInstance, task: ReviewTask, ctx: WorkflowContext) -> None:
         action = (task.resolution or {}).get("action")
-        if task.reason == "auth_required" and action == "auth_obtained":
+        if action == "records_received":
+            # A reviewer read the reply and knows the records arrived, even if the brain
+            # could not tell. Same ending as the RECORDS_RECEIVED signal, client included.
+            provider = await ctx.contact_name(instance.context["provider_contact_id"])
+            await ctx.send(
+                instance, instance.context["client_contact_id"],
+                f"Good news - {provider} has sent your medical records. Our team is reviewing them now.",
+                channel=instance.context.get("client_channel", "sms"),
+            )
+            await ctx.complete(instance, outcome="records_received")
+        elif action == "auth_obtained":
             instance.context = {**instance.context, "auth_required": False, "auth_obtained": True}
             instance.attempt_count = 0
             await ctx.schedule_wake(instance, ctx.now, reason="resume_after_auth")
+
         else:
             await super().on_review_resolved(instance, task, ctx)

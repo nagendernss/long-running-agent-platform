@@ -172,6 +172,17 @@ def ladder_sizes(runtime: Runtime) -> dict[str, int]:
     }
 
 
+async def resolution_options(runtime: Runtime, s: AsyncSession, tasks: list[ReviewTask]) -> dict[str, list[dict[str, str]]]:
+    """task id -> the domain outcomes its workflow lets a reviewer record."""
+    options: dict[str, list[dict[str, str]]] = {}
+    for task in tasks:
+        inst = await s.get(WorkflowInstance, task.instance_id) if task.instance_id else None
+        if inst is None:
+            continue
+        options[str(task.id)] = list(getattr(runtime.registry.get(inst.workflow_type), "resolution_options", []))
+    return options
+
+
 def clock_state(runtime: Runtime) -> dict[str, Any]:
     clock = runtime.clock
     travelling = isinstance(clock, OffsetClock)
@@ -233,12 +244,14 @@ async def api_clock_reset(runtime: Runtime = Depends(rt)):
 @app.get("/api/review-queue")
 async def api_review_queue(s: AsyncSession = Depends(session)):
     tasks = await list_pending_review_tasks(s)
+    options = await resolution_options(get_runtime(), s, tasks)
     return [
         {
             "id": str(t.id),
             "instance_id": str(t.instance_id),
             "reason": t.reason,
             "suggested_options": t.suggested_options,
+            "resolution_options": options.get(str(t.id), []),
             "context_snapshot": t.context_snapshot,
             "created_at": t.created_at.isoformat() if t.created_at else None,
         }
@@ -281,7 +294,8 @@ async def dashboard(request: Request, s: AsyncSession = Depends(session), runtim
     return TEMPLATES.TemplateResponse(
         request, "dashboard.html",
         {"instances": instances, "reviews": reviews, "workflow_types": runtime.registry.types(),
-         "clock": clock_state(runtime), "ladders": ladder_sizes(runtime)},
+         "clock": clock_state(runtime), "ladders": ladder_sizes(runtime),
+         "options": await resolution_options(runtime, s, reviews)},
     )
 
 
@@ -306,7 +320,7 @@ async def instance_page(
         request, "instance.html",
         {"instance": inst, "events": events, "rounds": build_rounds(events),
          "reviews": reviews, "case": case, "contacts": contacts, "clock": clock_state(runtime),
-         "ladders": ladder_sizes(runtime)},
+         "ladders": ladder_sizes(runtime), "options": await resolution_options(runtime, s, reviews)},
     )
 
 

@@ -60,6 +60,7 @@ class WorkflowDefinition(Protocol):
     initial_state: str
     retry_policy: dict[str, Any]
     response_deadline: str | None   # "3d" - how long silence counts as a non-answer
+    resolution_options: list[dict[str, str]]  # domain outcomes a reviewer can record
     domain_signals: list[type[Signal]]  # for a future LLM brain to build its tool schema
     keyword_rules: list["KeywordRule"]  # for the rule-based brain stub
 
@@ -87,6 +88,10 @@ class BaseWorkflow:
     # it an outreach nobody answers leaves the instance waiting forever, because the
     # retry ladder only advances on a signal. None disables the deadline (fire-and-forget).
     response_deadline: ClassVar[str | None] = None
+    # Outcomes a human can record from the review queue, beyond the generic retry and
+    # close. Without these a reviewer who knows what actually happened has no way to
+    # say so, and has to close the instance as abandoned instead.
+    resolution_options: ClassVar[list[dict[str, str]]] = []
     domain_signals: ClassVar[list[type[Signal]]] = []
     keyword_rules: ClassVar[list["KeywordRule"]] = []
 
