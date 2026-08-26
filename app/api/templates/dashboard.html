@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Review queue &mdash; {{ reviews|length }} pending</h2>
+{% if reviews %}
+<table>
+  <tr><th>Raised</th><th>Reason</th><th>Instance</th><th>Suggested</th><th>Resolve</th></tr>
+  {% for t in reviews %}
+  <tr>
+    <td class="dim mono">{{ t.created_at.strftime('%Y-%m-%d %H:%M') if t.created_at }}</td>
+    <td>{{ t.reason }}</td>
+    <td><a class="mono" href="/instances/{{ t.instance_id }}">{{ t.instance_id.hex[:8] }}</a></td>
+    <td class="dim">{{ (t.suggested_options or [])|join(', ') }}</td>
+    <td>
+      {% for action in ['retry', 'close'] %}
+      <form class="inline" method="post" action="/review-queue/{{ t.id }}/resolve">
+        <input type="hidden" name="action" value="{{ action }}">
+        <button type="submit">{{ action }}</button>
+      </form>
+      {% endfor %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}<div class="empty">Nothing waiting on a human.</div>{% endif %}
+
+<h2>Instances &mdash; {{ instances|length }} ({{ workflow_types|join(', ') }})</h2>
+{% if instances %}
+<table>
+  <tr><th>Instance</th><th>Workflow</th><th>State</th><th>Status</th><th>Attempts</th><th>Next wake</th><th>Reason</th></tr>
+  {% for i in instances %}
+  <tr>
+    <td><a class="mono" href="/instances/{{ i.id }}">{{ i.id.hex[:8] }}</a></td>
+    <td>{{ i.workflow_type }}</td>
+    <td class="mono">{{ i.state }}</td>
+    <td><span class="pill {{ i.status }}">{{ i.status }}</span></td>
+    <td>{{ i.attempt_count }}</td>
+    <td class="mono dim">{{ i.next_wake_at.strftime('%Y-%m-%d %H:%M') if i.next_wake_at else '—' }}</td>
+    <td class="dim">{{ i.wake_reason or '' }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}<div class="empty">No instances yet. POST /api/instances to start one.</div>{% endif %}
+{% endblock %}

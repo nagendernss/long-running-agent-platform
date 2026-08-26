@@ -1,0 +1,9 @@
+# Which entity fields the agent may write back, and how confident a signal must be
+# to auto-apply. Below threshold => fact stored as 'proposed' + review task.
+# Fields not listed here are never written (fact stored as 'rejected').
+contact:
+  phone: { auto_apply_threshold: 0.85 }
+  email: { auto_apply_threshold: 0.85 }
+  preferred_contact_time: { auto_apply_threshold: 0.6 }
+case_record:
+  matter_type: { auto_apply_threshold: 0.9 }

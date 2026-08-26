@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>{{ instance.workflow_type }} &mdash; <span class="mono">{{ instance.id }}</span></h2>
+<table>
+  <tr><th>State</th><td class="mono">{{ instance.state }}</td>
+      <th>Status</th><td><span class="pill {{ instance.status }}">{{ instance.status }}</span></td></tr>
+  <tr><th>Attempts</th><td>{{ instance.attempt_count }}</td>
+      <th>Next wake</th><td class="mono">{{ instance.next_wake_at or '—' }} <span class="dim">{{ instance.wake_reason or '' }}</span></td></tr>
+  <tr><th>Case</th><td class="mono">{{ case.matter_type if case else '—' }}</td>
+      <th>Contacts</th><td>{% for role, c in contacts.items() %}{% if c %}<div>{{ role }}: {{ c.name }} <span class="dim mono">{{ c.phone or c.email }}</span></div>{% endif %}{% endfor %}</td></tr>
+</table>
+
+{% if reviews %}
+<h2>Review tasks</h2>
+<table>
+  <tr><th>Raised</th><th>Reason</th><th>Status</th><th>Resolution</th><th></th></tr>
+  {% for t in reviews %}
+  <tr>
+    <td class="dim mono">{{ t.created_at.strftime('%m-%d %H:%M') if t.created_at }}</td>
+    <td>{{ t.reason }}</td>
+    <td><span class="pill">{{ t.status }}</span></td>
+    <td class="dim mono">{{ t.resolution or '' }} {{ ('by ' + t.resolved_by) if t.resolved_by else '' }}</td>
+    <td>
+      {% if t.status == 'pending' %}
+      {% for action in ['retry', 'close'] %}
+      <form class="inline" method="post" action="/review-queue/{{ t.id }}/resolve">
+        <input type="hidden" name="action" value="{{ action }}">
+        <button type="submit">{{ action }}</button>
+      </form>
+      {% endfor %}
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h2>Timeline &mdash; {{ events|length }} events</h2>
+<table>
+  <tr><th>#</th><th>At</th><th>Event</th><th>Payload</th></tr>
+  {% for e in events %}
+  <tr>
+    <td class="dim mono">{{ e.seq }}</td>
+    <td class="dim mono">{{ e.created_at.strftime('%Y-%m-%d %H:%M') if e.created_at }}</td>
+    <td class="mono">{{ e.type }}</td>
+    <td class="dim mono"><pre>{{ e.payload }}</pre></td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}
