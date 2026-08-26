@@ -32,6 +32,8 @@ from app.events import log_event
 log = logging.getLogger(__name__)
 
 TASK_NAME = "hc:execute_instance_wakeup"
+RECOVERY_TASK_NAME = "hc:recover_lost_wakes"
+RECOVERY_CRON = "*/5 * * * *"   # cheap: two indexed queries when nothing is wrong
 
 
 async def execute_instance_wakeup(instance_id: str, wake_token: str) -> None:
@@ -43,11 +45,26 @@ async def execute_instance_wakeup(instance_id: str, wake_token: str) -> None:
     log.info("wakeup %s -> %s", instance_id, result)
 
 
+async def recover_lost_wakes(timestamp: int | None = None) -> None:
+    """Periodic safety net. A wake lives in two places - the instance row (intent) and
+    a Procrastinate job (the timer) - written on separate connections, so anything that
+    destroys one without the other leaves an instance waiting on a timer that will
+    never fire. This finds those and re-arms them."""
+    from app.runtime import get_runtime
+    from app.scheduling.recovery import recover
+
+    report = await recover(get_runtime())
+    log.info("recovery sweep: %s", report.summary())
+
+
 def make_procrastinate_app(psycopg_url: str) -> procrastinate.App:
     app = procrastinate.App(connector=procrastinate.PsycopgConnector(conninfo=psycopg_url))
     # Registered per app instance: procrastinate Blueprints are mutated by
     # add_tasks_from, so a module-level blueprint cannot be reused safely.
     app.task(name=TASK_NAME)(execute_instance_wakeup)
+    app.periodic(cron=RECOVERY_CRON, queueing_lock="hc:recovery")(
+        app.task(name=RECOVERY_TASK_NAME, pass_context=False)(recover_lost_wakes)
+    )
     return app
 
 
