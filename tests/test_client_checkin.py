@@ -54,7 +54,9 @@ async def test_checkin_reschedule_and_no_answer_policy(rt, seed):
 async def test_concerning_reply_flags_for_human(rt, seed):
     iid = await start(rt, seed)
     sigs = await inbound(rt, iid, "honestly the pain is getting worse and I can't sleep")
-    assert [s.type for s in sigs] == ["CLIENT_FLAG"]
+    # the signal is now the template's shared FLAGGED rather than a per-workflow name;
+    # the review reason still carries this type's own wording (client_flag:*)
+    assert [s.type for s in sigs] == ["FLAGGED"]
     inst = await load(rt, iid)
     assert inst.status == "blocked"
     tasks = await review_tasks(rt, iid)

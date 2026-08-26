@@ -15,13 +15,22 @@ import pytest
 from app.agent_brain import RuleBasedAgentBrain
 from app.field_registry import FieldRegistry
 from app.llm_brain import GeminiAgentBrain, build_response_schema, parse_signals
-from app.workflows.client_checkin import CheckinOk, ClientFlag
 from app.workflows.medical_records import AuthRequired, RecordsReceived, RequestDenied
+from app.workflows.templates.outreach import OutreachSpec, OutreachTemplate
 from app.workflows.registry import default_registry
 
 TARGET = "11111111-1111-1111-1111-111111111111"
 CTX = {"workflow_type": "medical_records_followup", "state": "awaiting_reply", "context": {}, "target_contact_id": TARGET}
 REGISTRY = default_registry()
+# client_checkin is a database row in production; register an equivalent in-process so
+# these tests can assert what its extraction schema looks like without a database.
+REGISTRY.register(
+    OutreachTemplate(
+        "client_checkin",
+        OutreachSpec(message="hi", on_reply="repeat", repeat_every_days=14,
+                     escalate_keywords=["pain", "hospital"]),
+    )
+)
 FIELDS = FieldRegistry.from_dict({"contact": {"phone": {"auto_apply_threshold": 0.85}, "email": {"auto_apply_threshold": 0.85}}})
 
 
@@ -58,7 +67,7 @@ def test_schema_is_generated_from_the_workflow_not_hardcoded():
         "RECORDS_RECEIVED", "AUTH_REQUIRED", "REQUEST_DENIED",
     ]
     assert [c.model_fields["type"].default for c in brain.signal_classes("client_checkin")] == generic + [
-        "CLIENT_FLAG", "CHECKIN_OK",
+        "ACKNOWLEDGED", "FLAGGED",
     ]
     # each variant carries its own fields, correctly typed, with its own required list
     v = variants(build_response_schema(brain.signal_classes("medical_records_followup")))

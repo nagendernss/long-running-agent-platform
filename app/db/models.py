@@ -96,6 +96,19 @@ class ReviewTask(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
 
 
+class WorkflowTypeRow(Base):
+    """A workflow type defined as data: a template name plus the spec a person filled
+    in. Code-defined workflows are not rows - the registry serves both."""
+
+    __tablename__ = "workflow_type"
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    template: Mapped[str] = mapped_column(Text)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    description: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    updated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+
 # entity_type -> model, for base-column fallback in the fact resolver
 ENTITY_MODELS: dict[str, type[Base]] = {
     "contact": Contact,

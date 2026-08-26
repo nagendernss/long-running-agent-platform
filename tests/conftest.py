@@ -24,6 +24,9 @@ TABLES = [
     "review_task", "entity_fact_version", "event", "workflow_instance", "case_record", "contact",
     "procrastinate_events", "procrastinate_jobs",
 ]
+# workflow_type is NOT truncated - its seeded rows are the two workflows that used to
+# be Python modules. Types a test creates are cleared instead, so they cannot leak.
+SEEDED_TYPES = ("client_checkin", "contact_update")
 
 
 @pytest.fixture(scope="session")
@@ -58,6 +61,10 @@ async def rt(settings, schema) -> Runtime:
     runtime = await build_runtime(settings, clock=FakeClock(), channel=MockChannel(), durable=True)
     async with runtime.db_engine.begin() as conn:
         await conn.execute(text("TRUNCATE " + ", ".join(TABLES) + " CASCADE"))
+        await conn.execute(
+            text("DELETE FROM workflow_type WHERE name <> ALL(:keep)"), {"keep": list(SEEDED_TYPES)}
+        )
+    await runtime.registry.reload_from(runtime.session_factory)
     try:
         yield runtime
     finally:

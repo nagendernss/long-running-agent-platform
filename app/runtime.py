@@ -129,6 +129,7 @@ async def build_runtime(
         registry=registry,
         write_back=WriteBackResolver(field_registry),
     )
+    await registry.reload_from(session_factory)   # pick up template-defined types
     _runtime = Runtime(
         settings=settings,
         clock=clock,

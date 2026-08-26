@@ -72,11 +72,9 @@ async def test_completion_clears_the_deadline(rt, seed):
 async def test_deadline_is_declared_per_workflow(rt, seed):
     """It is workflow config, not an engine constant - a check-in waits differently
     from a records chase."""
-    from app.workflows.registry import default_registry
-
-    registry = default_registry()
-    assert registry.get("medical_records_followup").response_deadline
-    assert registry.get("client_checkin").response_deadline
+    # rt.registry has the database-defined types loaded; default_registry() is code only
+    assert rt.registry.get("medical_records_followup").response_deadline
+    assert rt.registry.get("client_checkin").response_deadline
 
     iid = await start(rt, seed, workflow="client_checkin",
                       target_contact_id=str(seed.client_id), client_contact_id=str(seed.client_id))

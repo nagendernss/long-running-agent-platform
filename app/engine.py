@@ -196,6 +196,7 @@ class Engine:
         case_id: uuid.UUID | None,
         context: dict[str, Any],
     ) -> WorkflowInstance:
+        await self.registry.ensure_fresh(session)
         definition = self.registry.get(workflow_type)
         now = self.clock.now()
         instance = WorkflowInstance(
