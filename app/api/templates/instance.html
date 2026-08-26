@@ -58,16 +58,21 @@
 </table>
 {% endif %}
 
-<h2>Timeline &mdash; {{ events|length }} events</h2>
-<table>
-  <tr><th>#</th><th>At</th><th>Event</th><th>Payload</th></tr>
-  {% for e in events %}
-  <tr>
-    <td class="dim mono">{{ e.seq }}</td>
-    <td class="dim mono">{{ e.created_at.strftime('%Y-%m-%d %H:%M') if e.created_at }}</td>
-    <td class="mono">{{ e.type }}</td>
-    <td class="dim mono"><pre>{{ e.payload }}</pre></td>
-  </tr>
-  {% endfor %}
-</table>
+<h2>How it played out &mdash; {{ events|length }} events, {{ rounds|length }} attempt{{ '' if rounds|length == 1 else 's' }}</h2>
+{% include "_timeline.html" with context %}
+
+<details class="tl-raw" style="margin-top:18px">
+  <summary>Event table</summary>
+  <table style="margin-top:8px">
+    <tr><th>#</th><th>At</th><th>Event</th><th>Payload</th></tr>
+    {% for e in events %}
+    <tr>
+      <td class="dim mono">{{ e.seq }}</td>
+      <td class="dim mono">{{ e.created_at.strftime('%Y-%m-%d %H:%M') if e.created_at }}</td>
+      <td class="mono">{{ e.type }}</td>
+      <td class="dim mono"><pre>{{ e.payload }}</pre></td>
+    </tr>
+    {% endfor %}
+  </table>
+</details>
 {% endblock %}

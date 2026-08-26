@@ -31,6 +31,38 @@ class FakeClock:
         self._now = at
 
 
+class OffsetClock:
+    """Real time plus an offset you can push forward - the dev server's time machine.
+
+    A FakeClock freezes time, which is right for tests but wrong for a running server
+    (nothing would ever tick on its own). This one keeps moving at real speed while
+    letting an operator jump the clock forward to see a 14-day wait fire now.
+
+    Scheduling stays honest: a wake is stored at virtual-now + delay, so after jumping
+    forward the same due-check that runs in production is what fires it.
+    """
+
+    def __init__(self, offset: timedelta | None = None):
+        self.offset = offset or timedelta()
+
+    def now(self) -> datetime:
+        return datetime.now(timezone.utc) + self.offset
+
+    def advance(self, delta: timedelta) -> datetime:
+        self.offset += delta
+        return self.now()
+
+    def advance_to(self, at: datetime) -> datetime:
+        """Jump to a specific virtual instant (used for 'skip to the next wake')."""
+        if at > self.now():
+            self.offset += at - self.now()
+        return self.now()
+
+    def reset(self) -> datetime:
+        self.offset = timedelta()
+        return self.now()
+
+
 _UNITS = {"m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
 _DURATION_RE = re.compile(r"^\s*(\d+)\s*([mhdw])\s*$", re.IGNORECASE)
 

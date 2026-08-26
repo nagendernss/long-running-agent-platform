@@ -1,7 +1,8 @@
 """Run the API + dashboard.
 
     python scripts/serve.py                       # uses DATABASE_URL from .env
-    python scripts/serve.py --embedded --seed     # embedded Postgres + demo data, nothing to install
+    python scripts/serve.py --embedded --seed             # embedded Postgres + a demo story
+    python scripts/serve.py --embedded --reset --seed     # flush first, then replay the story
 
 Why not plain `uvicorn app.api.main:app`? On Windows uvicorn installs a
 ProactorEventLoop, and psycopg (used by Procrastinate) refuses to run async on it.
@@ -14,7 +15,6 @@ import argparse
 import asyncio
 import os
 import sys
-import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,61 +31,15 @@ def start_embedded_postgres() -> str:
     return srv.get_uri("hellocounsel")
 
 
-async def seed_demo_data() -> None:
-    """Create a case with live instances so the dashboard has something to show:
-    one medical-records instance escalated to the review queue, one check-in waiting."""
-    from sqlalchemy import select
-
-    from app.config import get_settings
-    from app.db.models import CaseRecord, Contact, WorkflowInstance
-    from app.runtime import build_runtime
-
-    rt = await build_runtime(get_settings())
-    try:
-        async with rt.session_factory() as s, s.begin():
-            if (await s.execute(select(WorkflowInstance.id).limit(1))).scalar_one_or_none():
-                return  # already seeded
-            now = rt.clock.now()
-            client = Contact(id=uuid.uuid4(), name="Jane Client", role="client", phone="+15550001", email="jane@example.com", created_at=now)
-            provider = Contact(
-                id=uuid.uuid4(), name="Mercy Hospital Records", role="provider", phone="+15550100",
-                email="records@mercy.example", timezone="America/Chicago",
-                business_hours={"start": "08:00", "end": "16:00"}, created_at=now,
-            )
-            s.add_all([client, provider])
-            await s.flush()
-            case = CaseRecord(id=uuid.uuid4(), client_contact_id=client.id, matter_type="personal_injury", created_at=now)
-            s.add(case)
-            await s.flush()
-            medical = await rt.engine.start_instance(
-                s, "medical_records_followup", case_id=case.id,
-                context={
-                    "target_contact_id": str(provider.id), "provider_contact_id": str(provider.id),
-                    "client_contact_id": str(client.id), "provider_channel": "call", "client_channel": "sms",
-                },
-            )
-            await rt.engine.start_instance(
-                s, "client_checkin", case_id=case.id,
-                context={"target_contact_id": str(client.id), "client_contact_id": str(client.id), "client_channel": "sms"},
-            )
-            mid = medical.id
-
-        # a wrong-number correction, then no-answers until the retry ladder escalates
-        async with rt.session_factory() as s, s.begin():
-            await rt.engine.handle_inbound(s, mid, "wrong number, it's actually 555-0199", channel="call")
-        for _ in range(4):
-            async with rt.session_factory() as s, s.begin():
-                await rt.engine.handle_inbound(s, mid, "no answer, voicemail", channel="call")
-    finally:
-        await rt.close()
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--embedded", action="store_true", help="start a bundled Postgres instead of using DATABASE_URL")
-    ap.add_argument("--seed", action="store_true", help="insert demo instances if the database is empty")
+    ap.add_argument("--seed", action="store_true", help="play a demo story in if the database is empty")
+    ap.add_argument("--reset", action="store_true", help="delete every row first (the schema is kept)")
+    ap.add_argument("--real-clock", action="store_true",
+                    help="use the system clock; by default this dev server can time-travel")
     args = ap.parse_args()
 
     if args.embedded:
@@ -96,15 +50,27 @@ def main() -> None:
     import uvicorn
 
     from app.api.main import app
+    from app.clock import OffsetClock
     from app.config import get_settings
-    from app.runtime import ensure_schema
+    from app.runtime import build_runtime, ensure_schema
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from seed_story import reset_database, seed_story
 
     loop = asyncio.SelectorEventLoop()  # psycopg cannot use the Windows Proactor loop
     asyncio.set_event_loop(loop)
     try:
-        if args.seed:
+        if args.seed or args.reset:
             loop.run_until_complete(ensure_schema(get_settings()))
-            loop.run_until_complete(seed_demo_data())
+        if args.reset:
+            loop.run_until_complete(reset_database())
+        if args.seed:
+            loop.run_until_complete(seed_story())
+        if not args.real_clock:
+            # Build the runtime up front on a clock an operator can push forward, so a
+            # 14-day wait can be watched now. app.api.main's lifespan reuses it.
+            loop.run_until_complete(ensure_schema(get_settings()))
+            loop.run_until_complete(build_runtime(get_settings(), clock=OffsetClock()))
+            print("time travel enabled: use the header buttons or POST /api/simulate/advance")
         server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, loop="none", log_level="info"))
         print(f"dashboard: http://{args.host}:{args.port}/")
         loop.run_until_complete(server.serve())

@@ -1,0 +1,42 @@
+{# Two-lane rail: what we sent on the left, what came back on the right, engine
+   decisions on the spine. Rounds are attempts; the gaps between them are the wait. #}
+<div class="tl">
+  <div class="tl-legend">
+    <span class="tl-key tl-accent">↑ we sent</span>
+    <span class="tl-key tl-reply">↓ they replied</span>
+    <span class="tl-key tl-fact">Δ record changed</span>
+    <span class="tl-key tl-wait">◷ scheduled</span>
+    <span class="tl-key tl-alert">! needs a human</span>
+  </div>
+
+  {% for round in rounds %}
+    {% if round.gap_before %}
+    <div class="tl-gap"><span>waited {{ round.gap_before }}</span></div>
+    {% endif %}
+
+    <section class="tl-round">
+      <header class="tl-round-head">
+        <span class="tl-round-n">{{ round.index if round.index else '—' }}</span>
+        <span class="tl-round-title">{{ round.title }}</span>
+        {% if round.subtitle %}<span class="tl-round-sub">{{ round.subtitle }}</span>{% endif %}
+      </header>
+
+      {% for n in round.nodes %}
+      <div class="tl-row tl-{{ n.kind }}">
+        <div class="tl-time">{{ n.at.strftime('%b %d %H:%M') if n.at }}</div>
+        <div class="tl-dot tl-{{ n.tone }}"><span>{{ n.glyph }}</span></div>
+        <div class="tl-card tl-{{ n.tone }}">
+          <div class="tl-label">{{ n.label }}</div>
+          {% if n.detail %}<div class="tl-detail">{{ n.detail }}</div>{% endif %}
+          {% if n.chips %}
+          <div class="tl-chips">{% for c in n.chips %}<span class="tl-chip">{{ c }}</span>{% endfor %}</div>
+          {% endif %}
+          {% if n.payload %}
+          <details class="tl-raw"><summary>raw</summary><pre>{{ n.payload }}</pre></details>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </section>
+  {% endfor %}
+</div>

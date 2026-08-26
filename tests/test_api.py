@@ -87,7 +87,7 @@ async def test_filters_and_dashboard_pages(client, rt, seed):
     page = await client.get("/")
     assert page.status_code == 200 and "client_checkin" in page.text
     page = await client.get(f"/instances/{iid}")
-    assert page.status_code == 200 and "Timeline" in page.text
+    assert page.status_code == 200 and "How it played out" in page.text
 
 
 async def test_dashboard_resolve_form_posts(client, rt, seed):
@@ -148,7 +148,7 @@ async def test_dashboard_renders_the_fee_flow_and_resolves_it_with_a_reference(c
     assert "payment" in page and "mark done" in page
 
     inst_page = (await client.get(f"/instances/{iid}")).text
-    assert "Waiting on us" in inst_page and "$45 records fee before release" in inst_page
+    assert "<h2>Waiting on us</h2>" in inst_page and "$45 records fee before release" in inst_page
 
     task = next(t for t in (await client.get("/api/review-queue")).json() if t["instance_id"] == iid)
     r = await client.post(
@@ -164,8 +164,96 @@ async def test_dashboard_renders_the_fee_flow_and_resolves_it_with_a_reference(c
 
     inst_page = (await client.get(f"/instances/{iid}")).text
     assert "Done on our side" in inst_page and "chk-1041" in inst_page
-    assert "Waiting on us" not in inst_page
+    # the banner clears, but the timeline keeps the history of it
+    assert "<h2>Waiting on us</h2>" not in inst_page
+    assert "Waiting on us — payment" in inst_page
 
     # ...and the resumed outreach cites it
     assert [x["result"] for x in (await client.post("/api/simulate/tick")).json() if x["instance_id"] == iid] == ["executed"]
     assert "chk-1041" in rt.channel.outbox[-1].body
+
+
+async def test_instance_page_renders_the_timeline_as_rounds_and_lanes(client, rt, seed):
+    """The instance page should read as a story: attempts as rounds, sends and replies
+    on opposite lanes, and the wait between attempts drawn explicitly."""
+    from datetime import timedelta
+
+    r = await client.post(
+        "/api/instances",
+        json={"workflow_type": "medical_records_followup", "case_id": str(seed.case_id), "context": medical_context(seed)},
+    )
+    iid = r.json()["id"]
+    await client.post("/api/simulate/inbound", json={"instance_id": iid, "text": "wrong number, use 555-0142"})
+    await client.post("/api/simulate/inbound", json={"instance_id": iid, "text": "no answer"})
+    rt.clock.advance(timedelta(days=3))
+    await client.post("/api/simulate/tick")
+
+    page = (await client.get(f"/instances/{iid}")).text
+    assert "How it played out" in page
+    assert "Attempt 1" in page and "Attempt 2" in page, "rounds come from attempt_started"
+    assert "waited 2 days" in page or "waited 3 days" in page, "the wait between attempts is drawn"
+    assert 'class="tl-row tl-out"' in page and 'class="tl-row tl-in"' in page, "sends and replies use different lanes"
+    assert "phone applied" in page and "5550142" in page, "fact changes are legible, not raw json"
+    assert "Event table" in page, "the raw table stays available"
+
+
+async def test_time_travel_fires_a_long_wait_without_waiting(rt, seed):
+    """A 14-day reschedule has to be testable in the running server, not only in tests."""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.api.main import app
+    from app.clock import OffsetClock
+
+    original = rt.clock
+    rt.clock = rt.scheduler.clock = rt.engine.clock = OffsetClock()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/api/instances",
+                json={"workflow_type": "medical_records_followup", "case_id": str(seed.case_id),
+                      "context": medical_context(seed)},
+            )
+            iid = r.json()["id"]
+            await c.post("/api/simulate/inbound",
+                         json={"instance_id": iid, "text": "records not available for 2 weeks"})
+            assert (await c.get(f"/api/instances/{iid}")).json()["next_wake_at"] is not None
+            assert (await c.post("/api/simulate/tick")).json() == [], "not due yet on real time"
+
+            # explicit jump
+            body = (await c.post("/api/simulate/advance", json={"duration": "14d"})).json()
+            assert body["time_travel"] is True and body["offset_seconds"] >= 14 * 86400
+
+            # or jump straight to whatever is scheduled next
+            r = await c.post(
+                "/api/instances",
+                json={"workflow_type": "contact_update", "case_id": str(seed.case_id),
+                      "context": {"target_contact_id": str(seed.client_id), "message": "hi", "reminder": "3d"}},
+            )
+            iid2 = r.json()["id"]
+            body = (await c.post("/api/simulate/advance", json={})).json()
+            assert body["jumped_to"] is not None
+            assert any(f["instance_id"] == iid2 and f["result"] == "executed" for f in body["fired"])
+
+            page = (await c.get("/")).text
+            assert "skip to next wake" in page and "ahead" in page
+
+            assert (await c.post("/api/simulate/clock/reset")).json()["offset_seconds"] == 0
+    finally:
+        rt.clock = rt.scheduler.clock = rt.engine.clock = original
+
+
+async def test_advance_is_refused_on_the_real_clock(rt, seed):
+    from httpx import ASGITransport, AsyncClient
+
+    from app.api.main import app
+    from app.clock import SystemClock
+
+    original = rt.clock
+    rt.clock = rt.engine.clock = SystemClock()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post("/api/simulate/advance", json={"duration": "1d"})
+            assert r.status_code == 400 and "real clock" in r.json()["detail"]
+            assert (await c.get("/api/clock")).json()["time_travel"] is False
+    finally:
+        rt.clock = rt.engine.clock = original

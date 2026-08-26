@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import CaseRecord, Contact, EntityFactVersion, ReviewTask, WorkflowInstance
+from app.api.timeline import build_rounds
+from app.clock import OffsetClock, parse_duration
 from app.events import list_events
 from app.review import list_pending_review_tasks
 from app.runtime import Runtime, build_runtime, ensure_schema, get_runtime
@@ -25,13 +28,19 @@ TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:  # an entrypoint (scripts/serve.py) may have built one already, e.g. on a
+        get_runtime()  # time-travel clock - don't replace it
+        yield
+        return
+    except RuntimeError:
+        pass
     settings = get_settings()
     await ensure_schema(settings)
-    rt = await build_runtime(settings)
+    runtime = await build_runtime(settings)
     try:
         yield
     finally:
-        await rt.close()
+        await runtime.close()
 
 
 app = FastAPI(title="HelloCounsel Agent Platform", lifespan=lifespan)
@@ -57,6 +66,11 @@ class InboundIn(BaseModel):
     instance_id: uuid.UUID
     text: str
     channel: str = "sms"
+
+
+class AdvanceIn(BaseModel):
+    duration: str | None = None      # "2h", "14d" - omit to jump to the next due wake
+    run_due: bool = True
 
 
 class ResolveIn(BaseModel):
@@ -149,6 +163,64 @@ async def api_tick(runtime: Runtime = Depends(rt)):
         return [{"instance_id": str(i), "result": r} for i, r in await runtime.engine.run_due(s)]
 
 
+def clock_state(runtime: Runtime) -> dict[str, Any]:
+    clock = runtime.clock
+    travelling = isinstance(clock, OffsetClock)
+    return {
+        "now": clock.now().isoformat(),
+        "time_travel": travelling,
+        "offset_seconds": int(clock.offset.total_seconds()) if travelling else 0,
+    }
+
+
+@app.get("/api/clock")
+async def api_clock(runtime: Runtime = Depends(rt)):
+    return clock_state(runtime)
+
+
+@app.post("/api/simulate/advance")
+async def api_advance(body: AdvanceIn, runtime: Runtime = Depends(rt)):
+    """Push the dev server's clock forward so a 14-day wait can be watched in a second.
+
+    With no duration, jumps to just past the earliest pending wake - the usual way to
+    step an instance forward one attempt at a time.
+    """
+    clock = runtime.clock
+    if not isinstance(clock, OffsetClock):
+        raise HTTPException(400, "server is running on the real clock; start it with --time-travel")
+
+    if body.duration:
+        clock.advance(parse_duration(body.duration))
+        jumped_to = None
+    else:
+        async with runtime.session_factory() as s:
+            stmt = (
+                select(WorkflowInstance.next_wake_at)
+                .where(WorkflowInstance.status == "active", WorkflowInstance.next_wake_at.is_not(None))
+                .order_by(WorkflowInstance.next_wake_at.asc())
+                .limit(1)
+            )
+            nxt = (await s.execute(stmt)).scalar_one_or_none()
+        if nxt is None:
+            return {**clock_state(runtime), "fired": [], "note": "nothing is scheduled"}
+        jumped_to = nxt.isoformat()
+        clock.advance_to(nxt + timedelta(minutes=1))
+
+    fired = []
+    if body.run_due:
+        async with runtime.session_factory() as s, s.begin():
+            fired = [{"instance_id": str(i), "result": r} for i, r in await runtime.engine.run_due(s)]
+    return {**clock_state(runtime), "jumped_to": jumped_to, "fired": fired}
+
+
+@app.post("/api/simulate/clock/reset")
+async def api_clock_reset(runtime: Runtime = Depends(rt)):
+    if not isinstance(runtime.clock, OffsetClock):
+        raise HTTPException(400, "server is running on the real clock")
+    runtime.clock.reset()
+    return clock_state(runtime)
+
+
 @app.get("/api/review-queue")
 async def api_review_queue(s: AsyncSession = Depends(session)):
     tasks = await list_pending_review_tasks(s)
@@ -199,12 +271,15 @@ async def dashboard(request: Request, s: AsyncSession = Depends(session), runtim
     reviews = await list_pending_review_tasks(s)
     return TEMPLATES.TemplateResponse(
         request, "dashboard.html",
-        {"instances": instances, "reviews": reviews, "workflow_types": runtime.registry.types()},
+        {"instances": instances, "reviews": reviews, "workflow_types": runtime.registry.types(),
+         "clock": clock_state(runtime)},
     )
 
 
 @app.get("/instances/{instance_id}", response_class=HTMLResponse)
-async def instance_page(instance_id: uuid.UUID, request: Request, s: AsyncSession = Depends(session)):
+async def instance_page(
+    instance_id: uuid.UUID, request: Request, s: AsyncSession = Depends(session), runtime: Runtime = Depends(rt)
+):
     inst = await s.get(WorkflowInstance, instance_id)
     if inst is None:
         raise HTTPException(404, "instance not found")
@@ -220,8 +295,17 @@ async def instance_page(instance_id: uuid.UUID, request: Request, s: AsyncSessio
             contacts[key] = await s.get(Contact, uuid.UUID(cid))
     return TEMPLATES.TemplateResponse(
         request, "instance.html",
-        {"instance": inst, "events": events, "reviews": reviews, "case": case, "contacts": contacts},
+        {"instance": inst, "events": events, "rounds": build_rounds(events),
+         "reviews": reviews, "case": case, "contacts": contacts, "clock": clock_state(runtime)},
     )
+
+
+@app.post("/advance")
+async def advance_form(request: Request, runtime: Runtime = Depends(rt)):
+    form = await request.form()
+    body = AdvanceIn(duration=(form.get("duration") or None))
+    await api_advance(body, runtime)
+    return RedirectResponse(request.headers.get("referer") or "/", status_code=303)
 
 
 @app.post("/review-queue/{task_id}/resolve")

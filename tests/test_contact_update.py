@@ -106,4 +106,4 @@ async def test_it_shows_up_in_the_api_with_no_api_changes(rt, seed):
         assert [i["id"] for i in listed] == [str(iid)]
 
         page = (await c.get(f"/instances/{iid}")).text
-        assert "contact_update" in page and "Timeline" in page
+        assert "contact_update" in page and "How it played out" in page
