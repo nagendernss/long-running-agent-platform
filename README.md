@@ -42,6 +42,9 @@ Supporting pieces the Engine owns, all generic:
 | Channels | `app/channels/` | `MockChannel`; real telephony/email plugs in here |
 | Agent Brain | `app/agent_brain.py`, `app/llm_brain.py` | keyword baseline + Gemini, chosen by config |
 | Audit trail | `app/events.py` | append-only `event` table, monotonic `seq` |
+| Lost-wake recovery | `app/scheduling/recovery.py` | requeues stalled jobs, re-arms wakes whose job vanished |
+| Workflow types as data | `app/workflows/types.py`, `templates/` | rows configuring a template, built from the UI |
+| Instance timeline | `app/api/timeline.py` | events as attempt rounds and lanes |
 
 `tests/test_extensibility.py` enforces the invariant twice: it runs a brand-new
 workflow through the unmodified engine, and it greps `app/engine.py` and
@@ -109,17 +112,34 @@ python scripts/demo.py --db postgresql://...  # against your own Postgres
 Tests (spin up an embedded Postgres, run a real Procrastinate worker):
 
 ```bash
-python -m pytest -q                      # 54 passed - fully offline (stubbed HTTP, embedded Postgres)
+python -m pytest -q                      # 122 passed - fully offline (stubbed HTTP, embedded Postgres)
 python -m pytest -m live -o addopts=""   # 2 more: hit the real Gemini API, need GEMINI_API_KEY
 ```
 
 API + dashboard, and the durable worker:
 
 ```bash
-python scripts/serve.py --embedded --seed   # bundled Postgres + demo data, http://127.0.0.1:8000
-python scripts/serve.py                     # against DATABASE_URL from .env
-python scripts/worker.py                    # executes scheduled wake-ups
+python scripts/serve.py --embedded --reset --fresh   # flush, then one instance per workflow at day zero
+python scripts/serve.py --embedded --reset --seed    # flush, then replay 26 days of history
+python scripts/serve.py                              # against DATABASE_URL from .env
+python scripts/worker.py                             # durable wakes, recovery sweep, nightly prune
 ```
+
+The dev server runs on a clock you can push forward, so a 14-day wait is watchable in
+a second: the header carries `+2h / +1d / +7d` and **skip to next wake**, which jumps
+to just past the earliest scheduled wake and runs it. `POST /api/simulate/advance` is
+the same thing over the API, and `--real-clock` turns it off. Scheduling stays honest -
+wakes are stored at virtual-now + delay and fire through the same due-check production
+uses.
+
+### Reading an instance
+
+`/instances/{id}` renders the event log as rounds and lanes rather than a table of
+JSON. A round is an attempt (the numbering is the attempt counter); within it, what we
+sent sits on one side of the spine and what came back on the other, with engine
+decisions between them. The wait between attempts is drawn explicitly - *waited 2
+weeks* - because on this platform elapsed time is the substance. The raw payloads are
+one click away, and the old event table is still there behind a toggle.
 
 ---
 
@@ -169,6 +189,22 @@ UPDATEs `contact.phone`. Reads go through `get_entity_field()`, which prefers th
 latest applied fact and falls back to the base column. Below-threshold extractions
 land as `proposed` plus a review task, unregistered fields as `rejected` — so the
 same code path handles auto-apply, human confirmation, and refusal.
+
+**Silence is an outcome.** The retry ladder used to advance only when an explicit
+NO_ANSWER signal arrived from outside, so an outreach nobody ever answered - the normal
+case for an unanswered call or email - left the instance waiting forever with nothing
+scheduled. Workflows now declare a `response_deadline` ("3d"); after an attempt the
+Engine arms a wake with reason `response_timeout` unless the workflow scheduled
+something itself, and when it fires it feeds a synthetic `NoAnswer` through the normal
+path. A reply arriving first supersedes it. Handing off to a human clears any pending
+wake: an instance waiting on a person is not also waiting on a clock.
+
+**Clamped wakes are spread.** Everything coming due overnight or over a weekend
+clamps to the same instant, which at a thousand attempts a day is hundreds of calls on
+one second. Postgres would not care; a phone provider and an LLM both would. A wake
+that had to be moved gets a deterministic offset inside a 30-minute window, keyed on
+the instance so a matter keeps its slot. A time already inside business hours is left
+exactly as asked.
 
 **`seq BIGSERIAL` on `event`.** Timestamps collide (same transaction, virtual
 clock), which made the audit order nondeterministic. `seq` makes the timeline exact.
@@ -294,6 +330,28 @@ wakes, fact write-back, channel switching, the review queue, the API and the das
 
 ---
 
+## Operating it
+
+`scripts/worker.py` is the production process: it executes wakes and hosts two periodic
+tasks, both with a `queueing_lock` so they do not multiply across a fleet.
+
+| Task | When | What it does |
+|---|---|---|
+| `hc:recover_lost_wakes` | every 5 minutes, and once at worker start-up | requeues jobs stalled by a dead worker; re-arms any active instance past due with no live job |
+| `hc:prune_finished_jobs` | daily at 03:17 | deletes Procrastinate jobs finished more than 30 days ago |
+
+The recovery sweep exists because a wake lives in two records written on two
+connections - the instance row (intent, and the source of truth) and a Procrastinate
+job (the timer). Ordering makes the write path fail-safe: the job is deferred before
+the app transaction commits, so a failed defer rolls everything back, and a job that
+survives a rolled-back transaction fires against a token that no longer matches. What
+ordering cannot cover is what happens after a good commit - a worker dying mid-job, a
+purge, a restore, a hand-edited row - and those were silent before. Recovery logs a
+`wake_recovered` event, so it shows up in the timeline rather than only in logs.
+
+Nothing above runs under `scripts/serve.py`; the dev server drives wakes through the
+time-travel controls instead.
+
 ## API surface (thin by design)
 
 | Method | Path | |
@@ -308,6 +366,12 @@ wakes, fact write-back, channel switching, the review queue, the API and the das
 | GET | `/api/review-queue` | pending human tasks |
 | POST | `/api/review-queue/{id}/resolve` | resolve one (`{"resolution": {"action": "retry"}}`) |
 | GET | `/api/contacts/{id}/facts` | fact history for one contact |
+| GET/POST | `/api/workflow-types` | list every type (code and built) / create or edit a built one |
+| POST | `/api/agents` | start an agent, creating its contact in the same call |
+| GET | `/api/clock` | the server's clock and how far it has been pushed |
+| POST | `/api/simulate/advance` | jump the clock (`{"duration": "14d"}`, or omit to reach the next wake) |
+| GET/POST | `/workflows` | the builder |
+| GET/POST | `/instances/new` | start an agent from a form |
 
 ---
 
@@ -343,5 +407,29 @@ wakes, fact write-back, channel switching, the review queue, the API and the das
   Confidence thresholds and the review queue are the current mitigation.
 - Phone numbers are stored as extracted (`5550199`), not E.164-normalised.
 - `Engine.run_due` processes due instances sequentially in one transaction; fine as
-  a sweep, but the Procrastinate worker is the concurrent path.
+  a sweep, but the Procrastinate worker is the concurrent path. It does not use
+  `SKIP LOCKED`, so it is not safe to run as a second concurrent dispatcher.
+- Side effects run inside the database transaction. `MockChannel` is in-memory so it
+  does not matter yet, but a real Twilio or SendGrid call would hold a Postgres
+  transaction open across a network round-trip and would not roll back if the
+  transaction later aborted. The same applies to the Gemini call in `handle_inbound`.
+- Editing a workflow type changes what its in-flight instances do at their next step.
+  Flagged in the builder; spec versioning is not built.
+- No metrics. The number worth exporting first is due-lag:
+  `now() - min(next_wake_at)` over active instances, which says whether the fleet is
+  keeping up.
+- No dead-letter path. A wake that keeps throwing retries under Procrastinate's policy
+  rather than becoming a review task.
 - Python 3.11 (the plan said 3.12; nothing here needs 3.12 syntax).
+
+### If this grows
+
+The timer lives in two records - the instance row and a Procrastinate job - and the
+fencing token, the cancel-on-reschedule and the recovery sweep all exist to reconcile
+them. Collapsing to one record, with workers claiming due instances through
+`SELECT ... FOR UPDATE SKIP LOCKED` on `workflow_instance` and `LISTEN/NOTIFY` for
+latency, removes all three: there is nothing to go stale, and a crashed worker's
+transaction simply rolls back and leaves the row due again. That is the change worth
+making before reaching for a broker. SQS in particular is not a candidate for the
+timers - its maximum message delay is 15 minutes against waits measured in weeks - and
+would reintroduce the two-record split it is meant to solve.
