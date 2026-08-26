@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% set show_instance = false %}
 {% block content %}
 <h2>{{ instance.workflow_type }} &mdash; <span class="mono">{{ instance.id }}</span></h2>
 <table>
@@ -10,27 +11,49 @@
       <th>Contacts</th><td>{% for role, c in contacts.items() %}{% if c %}<div>{{ role }}: {{ c.name }} <span class="dim mono">{{ c.phone or c.email }}</span></div>{% endif %}{% endfor %}</td></tr>
 </table>
 
+{% set pending = (instance.context or {}).get('pending_requirement') %}
+{% if pending %}
+<h2>Waiting on us</h2>
+<table>
+  <tr><th>Action</th><th>What</th><th>Particulars</th><th>Since</th></tr>
+  <tr>
+    <td><span class="pill blocked">{{ pending.action_type }}</span></td>
+    <td>{{ pending.summary }}</td>
+    <td class="dim mono">{% for k, v in (pending.details or {}).items() %}<div>{{ k }}: {{ v }}</div>{% endfor %}</td>
+    <td class="dim mono">{{ pending.requested_at }}</td>
+  </tr>
+</table>
+{% endif %}
+
+{% set completed = (instance.context or {}).get('completed_requirements') or [] %}
+{% if completed %}
+<h2>Done on our side</h2>
+<table>
+  <tr><th>Action</th><th>What</th><th>Reference</th><th>By</th></tr>
+  {% for c in completed %}
+  <tr>
+    <td class="mono">{{ c.action_type }}</td>
+    <td>{{ c.summary }}</td>
+    <td class="mono">{{ (c.resolution or {}).get('reference') or '—' }}</td>
+    <td class="dim">{{ c.completed_by }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
 {% if reviews %}
 <h2>Review tasks</h2>
 <table>
-  <tr><th>Raised</th><th>Reason</th><th>Status</th><th>Resolution</th><th></th></tr>
+  <tr><th>Raised</th><th>Needs a human</th><th>Suggested</th><th>Resolve</th></tr>
   {% for t in reviews %}
-  <tr>
-    <td class="dim mono">{{ t.created_at.strftime('%m-%d %H:%M') if t.created_at }}</td>
-    <td>{{ t.reason }}</td>
-    <td><span class="pill">{{ t.status }}</span></td>
-    <td class="dim mono">{{ t.resolution or '' }} {{ ('by ' + t.resolved_by) if t.resolved_by else '' }}</td>
-    <td>
-      {% if t.status == 'pending' %}
-      {% for action in ['retry', 'close'] %}
-      <form class="inline" method="post" action="/review-queue/{{ t.id }}/resolve">
-        <input type="hidden" name="action" value="{{ action }}">
-        <button type="submit">{{ action }}</button>
-      </form>
-      {% endfor %}
-      {% endif %}
-    </td>
-  </tr>
+    {% if t.status == 'pending' %}{% include "_review_row.html" with context %}{% else %}
+    <tr>
+      <td class="dim mono">{{ t.created_at.strftime('%m-%d %H:%M') if t.created_at }}</td>
+      <td class="dim">{{ t.reason }}</td>
+      <td class="dim mono">{{ t.resolution or '' }}</td>
+      <td><span class="pill completed">resolved{{ ' by ' + t.resolved_by if t.resolved_by }}</span></td>
+    </tr>
+    {% endif %}
   {% endfor %}
 </table>
 {% endif %}

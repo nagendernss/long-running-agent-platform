@@ -123,3 +123,48 @@ async def test_error_paths(client, seed):
     assert (await client.get(f"/api/instances/{seed.case_id}")).status_code == 404
     r = await client.post("/api/simulate/inbound", json={"instance_id": str(seed.case_id), "text": "hi"})
     assert r.status_code == 404
+
+
+async def test_dashboard_renders_the_fee_flow_and_resolves_it_with_a_reference(client, rt, seed):
+    """The requirement particulars and the 'mark done & resume' box must be in the HTML,
+    not just the JSON - a paralegal works from the dashboard."""
+    from app.signals import ActionRequired
+
+    r = await client.post(
+        "/api/instances",
+        json={"workflow_type": "medical_records_followup", "case_id": str(seed.case_id), "context": medical_context(seed)},
+    )
+    iid = r.json()["id"]
+    async with rt.session_factory() as s, s.begin():
+        inst = await rt.engine._lock_instance(s, iid)
+        await rt.engine.advance_instance(s, inst, [ActionRequired(
+            action_type="payment", summary="$45 records fee before release",
+            details={"amount": "$45", "payee": "Mercy HIM"}, confidence=0.95, evidence="a $45 fee",
+        )])
+
+    page = (await client.get("/")).text
+    assert "$45" in page and "Mercy HIM" in page, "particulars must be on the dashboard"
+    assert "payment" in page and "mark done" in page
+
+    inst_page = (await client.get(f"/instances/{iid}")).text
+    assert "Waiting on us" in inst_page and "$45 records fee before release" in inst_page
+
+    task = next(t for t in (await client.get("/api/review-queue")).json() if t["instance_id"] == iid)
+    r = await client.post(
+        f"/review-queue/{task['id']}/resolve",
+        data={"action": "completed", "reference": "chk-1041"},
+        headers={"referer": f"/instances/{iid}"},
+    )
+    assert r.status_code == 303
+
+    body = (await client.get(f"/api/instances/{iid}")).json()
+    assert body["status"] == "active" and "pending_requirement" not in body["context"]
+    assert body["context"]["completed_requirements"][-1]["resolution"]["reference"] == "chk-1041"
+
+    inst_page = (await client.get(f"/instances/{iid}")).text
+    assert "Done on our side" in inst_page and "chk-1041" in inst_page
+    assert "Waiting on us" not in inst_page
+
+    # ...and the resumed outreach cites it
+    assert [x["result"] for x in (await client.post("/api/simulate/tick")).json() if x["instance_id"] == iid] == ["executed"]
+    assert "chk-1041" in rt.channel.outbox[-1].body

@@ -1,24 +1,12 @@
 {% extends "base.html" %}
+{% set show_instance = true %}
 {% block content %}
 <h2>Review queue &mdash; {{ reviews|length }} pending</h2>
 {% if reviews %}
 <table>
-  <tr><th>Raised</th><th>Reason</th><th>Instance</th><th>Suggested</th><th>Resolve</th></tr>
+  <tr><th>Raised</th><th>Needs a human</th><th>Suggested</th><th>Resolve</th></tr>
   {% for t in reviews %}
-  <tr>
-    <td class="dim mono">{{ t.created_at.strftime('%Y-%m-%d %H:%M') if t.created_at }}</td>
-    <td>{{ t.reason }}</td>
-    <td><a class="mono" href="/instances/{{ t.instance_id }}">{{ t.instance_id.hex[:8] }}</a></td>
-    <td class="dim">{{ (t.suggested_options or [])|join(', ') }}</td>
-    <td>
-      {% for action in ['retry', 'close'] %}
-      <form class="inline" method="post" action="/review-queue/{{ t.id }}/resolve">
-        <input type="hidden" name="action" value="{{ action }}">
-        <button type="submit">{{ action }}</button>
-      </form>
-      {% endfor %}
-    </td>
-  </tr>
+    {% include "_review_row.html" with context %}
   {% endfor %}
 </table>
 {% else %}<div class="empty">Nothing waiting on a human.</div>{% endif %}

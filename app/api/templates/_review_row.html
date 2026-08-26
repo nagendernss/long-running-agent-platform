@@ -1,0 +1,41 @@
+{# One review-queue row. `action_required:*` tasks carry a structured requirement,
+   so they get the particulars a paralegal needs plus a reference box; everything
+   else gets the plain retry/close pair. #}
+{% set req = (t.context_snapshot or {}).get('requirement') %}
+<tr>
+  <td class="dim mono">{{ t.created_at.strftime('%m-%d %H:%M') if t.created_at }}</td>
+  <td>
+    {% if req %}
+      <span class="pill blocked">{{ req.action_type }}</span>
+      <div class="req-summary">{{ req.summary }}</div>
+      <div class="req-details">
+        {% for key, value in (req.details or {}).items() %}
+          <span class="kv"><span class="dim">{{ key }}</span> {{ value }}</span>
+        {% endfor %}
+      </div>
+    {% else %}
+      {{ t.reason }}
+    {% endif %}
+    {% if show_instance %}
+      <div class="dim">on <a class="mono" href="/instances/{{ t.instance_id }}">{{ t.instance_id.hex[:8] }}</a></div>
+    {% endif %}
+  </td>
+  <td class="dim">{{ (t.suggested_options or [])|join(', ') }}</td>
+  <td>
+    {% if req %}
+      <form method="post" action="/review-queue/{{ t.id }}/resolve" class="resolve">
+        <input type="hidden" name="action" value="completed">
+        <input type="text" name="reference" placeholder="reference (e.g. chk-1041)" size="18">
+        <button type="submit" title="Records this as done; the agent resumes and cites the reference">
+          mark done &amp; resume
+        </button>
+      </form>
+    {% endif %}
+    {% for action in ['retry', 'close'] %}
+    <form class="inline" method="post" action="/review-queue/{{ t.id }}/resolve">
+      <input type="hidden" name="action" value="{{ action }}">
+      <button type="submit">{{ action }}</button>
+    </form>
+    {% endfor %}
+  </td>
+</tr>

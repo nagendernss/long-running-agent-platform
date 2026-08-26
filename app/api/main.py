@@ -226,9 +226,19 @@ async def instance_page(instance_id: uuid.UUID, request: Request, s: AsyncSessio
 
 @app.post("/review-queue/{task_id}/resolve")
 async def resolve_form(task_id: uuid.UUID, request: Request, runtime: Runtime = Depends(rt)):
+    """Dashboard resolve buttons. `reference` is what a paralegal types after paying a
+    fee or submitting a portal form - it rides along on the instance and gets cited in
+    the next message to the other party."""
     form = await request.form()
+    resolution: dict[str, Any] = {"action": form.get("action") or "close"}
+    reference = (form.get("reference") or "").strip()
+    if reference:
+        resolution["reference"] = reference
     async with runtime.session_factory() as s, s.begin():
-        await runtime.engine.resolve_review_task(
-            s, task_id, {"action": form.get("action", "close")}, resolved_by=form.get("resolved_by") or "dashboard"
-        )
+        try:
+            await runtime.engine.resolve_review_task(
+                s, task_id, resolution, resolved_by=form.get("resolved_by") or "dashboard"
+            )
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from None
     return RedirectResponse(request.headers.get("referer") or "/", status_code=303)
