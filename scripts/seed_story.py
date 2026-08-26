@@ -147,3 +147,52 @@ async def seed_story(settings: Settings | None = None) -> None:
         print(f"seeded 3 instances spanning {(clock.now() - started).days} virtual days")
     finally:
         await rt.close()
+
+
+async def seed_fresh(settings: Settings | None = None) -> None:
+    """Day zero: one instance per registered workflow, started just now, no history.
+
+    Each opens on its first attempt with a response deadline armed, so the header's
+    "skip to next wake" walks them forward through the retry ladder from the start.
+    """
+    from app.channels import MockChannel
+
+    rt = await build_runtime(settings or get_settings(), channel=MockChannel())
+    try:
+        async with rt.session_factory() as s, s.begin():
+            if (await s.execute(select(WorkflowInstance.id).limit(1))).scalar_one_or_none():
+                print("database already has instances; skipping seed")
+                return
+            now = rt.clock.now()
+            client = Contact(id=uuid.uuid4(), name="Jane Okafor", role="client", phone="+15550001",
+                             email="jane@example.com", created_at=now)
+            provider = Contact(id=uuid.uuid4(), name="Mercy Hospital Records", role="provider",
+                               phone="+15550100", email="records@mercy.example", timezone="America/Chicago",
+                               business_hours={"start": "08:00", "end": "16:00"}, created_at=now)
+            clerk = Contact(id=uuid.uuid4(), name="County Clerk", role="staff", phone="+15550300",
+                            email="clerk@county.example", created_at=now)
+            s.add_all([client, provider, clerk])
+            await s.flush()
+            case = CaseRecord(id=uuid.uuid4(), client_contact_id=client.id,
+                              matter_type="personal_injury", created_at=now)
+            s.add(case)
+            await s.flush()
+
+            await rt.engine.start_instance(
+                s, "medical_records_followup", case_id=case.id,
+                context={"target_contact_id": str(provider.id), "provider_contact_id": str(provider.id),
+                         "client_contact_id": str(client.id), "provider_channel": "call", "client_channel": "sms"},
+            )
+            await rt.engine.start_instance(
+                s, "client_checkin", case_id=case.id,
+                context={"target_contact_id": str(client.id), "client_contact_id": str(client.id),
+                         "client_channel": "sms"},
+            )
+            await rt.engine.start_instance(
+                s, "contact_update", case_id=case.id,
+                context={"target_contact_id": str(clerk.id), "channel": "email",
+                         "message": "Confirming the filing deadline for the Okafor matter is March 3rd."},
+            )
+        print("seeded 3 instances at day zero")
+    finally:
+        await rt.close()

@@ -3,6 +3,7 @@
     python scripts/serve.py                       # uses DATABASE_URL from .env
     python scripts/serve.py --embedded --seed             # embedded Postgres + a demo story
     python scripts/serve.py --embedded --reset --seed     # flush first, then replay the story
+    python scripts/serve.py --embedded --reset --fresh    # flush, then start every workflow at day zero
 
 Why not plain `uvicorn app.api.main:app`? On Windows uvicorn installs a
 ProactorEventLoop, and psycopg (used by Procrastinate) refuses to run async on it.
@@ -36,7 +37,8 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--embedded", action="store_true", help="start a bundled Postgres instead of using DATABASE_URL")
-    ap.add_argument("--seed", action="store_true", help="play a demo story in if the database is empty")
+    ap.add_argument("--seed", action="store_true", help="replay a 26-day demo story if the database is empty")
+    ap.add_argument("--fresh", action="store_true", help="start one instance per workflow at day zero")
     ap.add_argument("--reset", action="store_true", help="delete every row first (the schema is kept)")
     ap.add_argument("--real-clock", action="store_true",
                     help="use the system clock; by default this dev server can time-travel")
@@ -54,17 +56,19 @@ def main() -> None:
     from app.config import get_settings
     from app.runtime import build_runtime, ensure_schema
     sys.path.insert(0, str(ROOT / "scripts"))
-    from seed_story import reset_database, seed_story
+    from seed_story import reset_database, seed_fresh, seed_story
 
     loop = asyncio.SelectorEventLoop()  # psycopg cannot use the Windows Proactor loop
     asyncio.set_event_loop(loop)
     try:
-        if args.seed or args.reset:
+        if args.seed or args.fresh or args.reset:
             loop.run_until_complete(ensure_schema(get_settings()))
         if args.reset:
             loop.run_until_complete(reset_database())
         if args.seed:
             loop.run_until_complete(seed_story())
+        if args.fresh:
+            loop.run_until_complete(seed_fresh())
         if not args.real_clock:
             # Build the runtime up front on a clock an operator can push forward, so a
             # 14-day wait can be watched now. app.api.main's lifespan reuses it.
