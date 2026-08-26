@@ -33,6 +33,7 @@ class ContactUpdateWorkflow(BaseWorkflow):
     workflow_type: ClassVar[str] = "contact_update"
     initial_state: ClassVar[str] = "awaiting_ack"
     retry_policy: ClassVar[dict[str, Any]] = {"no_answer": {"schedule": ["1d", "3d"]}}
+    response_deadline: ClassVar[str | None] = "2d"
     domain_signals: ClassVar[list[type[Signal]]] = [Acknowledged]
     keyword_rules: ClassVar[list[KeywordRule]] = [
         rule(

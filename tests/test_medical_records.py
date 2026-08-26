@@ -28,7 +28,10 @@ async def test_initial_send_goes_to_provider_and_nothing_is_due(rt, seed):
     outbox = rt.channel.outbox
     assert len(outbox) == 1 and outbox[0].address == seed.provider_phone and outbox[0].channel == "call"
     inst = await load(rt, iid)
-    assert inst.state == "awaiting_reply" and inst.status == "active" and inst.next_wake_at is None
+    assert inst.state == "awaiting_reply" and inst.status == "active"
+    # sending arms a response deadline: silence is an outcome, not a dead end
+    assert inst.wake_reason == "response_timeout"
+    assert timedelta(days=3) <= inst.next_wake_at - rt.clock.now() <= timedelta(days=6)
     assert await tick(rt) == []
     assert (await events(rt, iid))[:3] == ["instance_created", "attempt_started", "message_sent"]
 
@@ -77,9 +80,9 @@ async def test_reschedule_sets_wake_14d_out_resets_attempts_and_updates_client(r
     rt.clock.advance(timedelta(days=15))
     assert [r for _, r in await tick(rt)] == ["executed"]
     inst = await load(rt, iid)
-    assert inst.next_wake_at is None and inst.wake_token is None
     assert rt.channel.outbox[-1].address == seed.provider_phone
-    assert await tick(rt) == []  # second tick: nothing left
+    assert inst.wake_reason == "response_timeout"      # the follow-up now has its own deadline
+    assert await tick(rt) == []                        # nothing else is due yet
 
 
 async def test_no_answer_follows_retry_schedule_then_escalates(rt, seed):

@@ -55,7 +55,7 @@ async def test_inherits_the_retry_ladder_and_escalation(rt, seed):
 
     await inbound(rt, iid, "no answer")  # ladder exhausted
     inst = await load(rt, iid)
-    assert inst.status == "blocked" and inst.next_wake_at is None
+    assert inst.status == "blocked" and inst.next_wake_at is None, "handing off stops the clock"
     assert [t.reason for t in await review_tasks(rt, iid)] == ["stalled_no_response"]
 
 
@@ -88,7 +88,7 @@ async def test_reminder_schedules_one_nudge(rt, seed):
     assert [r for _, r in await tick(rt)] == ["executed"]
     inst = await load(rt, iid)
     assert inst.context["reminded"] is True
-    assert inst.next_wake_at is None, "only one nudge, then the retry ladder takes over"
+    assert inst.wake_reason == "response_timeout", "one nudge, then the deadline takes over"
 
 
 async def test_it_shows_up_in_the_api_with_no_api_changes(rt, seed):

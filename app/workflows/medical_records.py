@@ -49,6 +49,7 @@ class MedicalRecordsFollowupWorkflow(BaseWorkflow):
     workflow_type: ClassVar[str] = "medical_records_followup"
     initial_state: ClassVar[str] = "awaiting_reply"
     retry_policy: ClassVar[dict[str, Any]] = {"no_answer": {"schedule": ["2d", "5d", "14d"]}}
+    response_deadline: ClassVar[str | None] = "3d"
     domain_signals: ClassVar[list[type[Signal]]] = [RecordsReceived, AuthRequired, RequestDenied]
     keyword_rules: ClassVar[list[KeywordRule]] = [
         rule(

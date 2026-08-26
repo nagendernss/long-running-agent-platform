@@ -37,6 +37,7 @@ class ClientCheckinWorkflow(BaseWorkflow):
     workflow_type: ClassVar[str] = "client_checkin"
     initial_state: ClassVar[str] = "scheduled"
     retry_policy: ClassVar[dict[str, Any]] = {"no_answer": {"schedule": ["1d", "3d"]}, "cadence": "14d"}
+    response_deadline: ClassVar[str | None] = "2d"
     domain_signals: ClassVar[list[type[Signal]]] = [ClientFlag, CheckinOk]
     keyword_rules: ClassVar[list[KeywordRule]] = [
         rule(

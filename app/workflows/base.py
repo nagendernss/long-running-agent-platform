@@ -59,6 +59,7 @@ class WorkflowDefinition(Protocol):
     workflow_type: str
     initial_state: str
     retry_policy: dict[str, Any]
+    response_deadline: str | None   # "3d" - how long silence counts as a non-answer
     domain_signals: list[type[Signal]]  # for a future LLM brain to build its tool schema
     keyword_rules: list["KeywordRule"]  # for the rule-based brain stub
 
@@ -82,6 +83,10 @@ class BaseWorkflow:
     workflow_type: ClassVar[str]
     initial_state: ClassVar[str]
     retry_policy: ClassVar[dict[str, Any]] = {}
+    # How long to wait for a reply before treating the silence as a non-answer. Without
+    # it an outreach nobody answers leaves the instance waiting forever, because the
+    # retry ladder only advances on a signal. None disables the deadline (fire-and-forget).
+    response_deadline: ClassVar[str | None] = None
     domain_signals: ClassVar[list[type[Signal]]] = []
     keyword_rules: ClassVar[list["KeywordRule"]] = []
 

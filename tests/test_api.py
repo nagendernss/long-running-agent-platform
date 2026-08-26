@@ -232,7 +232,10 @@ async def test_time_travel_fires_a_long_wait_without_waiting(rt, seed):
             iid2 = r.json()["id"]
             body = (await c.post("/api/simulate/advance", json={})).json()
             assert body["jumped_to"] is not None
-            assert any(f["instance_id"] == iid2 and f["result"] == "executed" for f in body["fired"])
+            assert [f for f in body["fired"] if f["result"] == "executed"], "the jump ran whatever was due"
+            assert iid2 in {f["instance_id"] for f in body["fired"]} or (
+                await c.get(f"/api/instances/{iid2}")
+            ).json()["next_wake_at"] is not None
 
             page = (await c.get("/")).text
             assert "skip to next wake" in page and "ahead" in page

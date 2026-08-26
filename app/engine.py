@@ -237,8 +237,21 @@ class Engine:
             await definition.on_start(instance, ctx)
         else:
             await definition.on_wake(instance, ctx)
+        await self._arm_response_deadline(session, instance, definition)
         instance.updated_at = self.clock.now()
         return True
+
+    async def _arm_response_deadline(
+        self, session: AsyncSession, instance: WorkflowInstance, definition: WorkflowDefinition
+    ) -> None:
+        """After reaching out, wait a declared amount for a reply. Skipped when the
+        workflow already scheduled something itself (a reminder, a cadence) or when it
+        finished or handed off - so it never fights the workflow for the timer."""
+        deadline = getattr(definition, "response_deadline", None)
+        if not deadline or instance.status != "active" or instance.next_wake_at is not None:
+            return
+        at = self.clock.now() + parse_duration(deadline)
+        await self.scheduler.schedule_wake(session, instance, at, reason="response_timeout")
 
     # -- wake execution (called by the Procrastinate worker AND the poller) ---------
     async def execute_wakeup(
@@ -263,6 +276,25 @@ class Engine:
         key = f"{instance.id}:{instance.wake_token}"
         reason = instance.wake_reason or "wake"
         await self.scheduler.clear_wake(instance)
+
+        if reason == "response_timeout":
+            # Nobody replied in time. No outreach to make here - the silence itself is
+            # the outcome, so it goes through the normal NO_ANSWER path (retry ladder,
+            # client update, escalation when the ladder is spent).
+            if await idempotency_key_exists(session, key):
+                await log_event(session, instance.id, "wake_skipped", {"reason": "duplicate", "key": key}, now=now)
+                return "skipped:duplicate"
+            await log_event(
+                session, instance.id, "response_timeout",
+                {"attempt": instance.attempt_count, "waited": self.definition_for(instance).response_deadline},
+                now=now, idempotency_key=key,
+            )
+            await self.advance_instance(
+                session, instance,
+                [NoAnswer(confidence=1.0, evidence="no reply before the response deadline")],
+            )
+            return "executed"
+
         ran = await self._run_attempt(session, instance, key=key, reason=reason)
         return "executed" if ran else "skipped:duplicate"
 
@@ -344,6 +376,7 @@ class Engine:
             delay = resolve_retry_delay(definition.retry_policy, instance.attempt_count)
             if delay is None:
                 await ctx.log(instance, "outcome_recorded", {"outcome": "no_answer", "attempt": instance.attempt_count, "retry": "exhausted"})
+                await self.scheduler.clear_wake(instance)  # handing off - stop the clock
                 await create_review_task(
                     session,
                     instance,
@@ -410,6 +443,7 @@ class Engine:
                 )
 
         elif isinstance(signal, NeedsHuman):
+            await self.scheduler.clear_wake(instance)  # handing off - stop the clock
             await create_review_task(session, instance, signal.reason, now=now, suggested_options=signal.suggested_options)
 
         else:  # pragma: no cover - GENERIC_SIGNAL_TYPES and these branches must stay in sync

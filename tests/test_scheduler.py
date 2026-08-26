@@ -35,7 +35,7 @@ async def test_procrastinate_worker_executes_due_wake(rt, seed):
     jobs = list(await rt.procrastinate_app.job_manager.list_jobs_async(id=job_id))
     assert jobs[0].status == "succeeded"
     inst = await load(rt, iid)
-    assert inst.next_wake_at is None and inst.wake_token is None and inst.wake_job_id is None
+    assert inst.wake_reason == "response_timeout", "the attempt it ran armed its own deadline"
     assert len(rt.channel.outbox) == sent_before + 1
     assert rt.channel.outbox[-1].address == seed.provider_phone
     ev = await events(rt, iid)
@@ -64,9 +64,12 @@ async def test_reschedule_cancels_previous_job_and_stale_token_is_noop(rt, seed)
     await run_worker(rt)
     assert len(rt.channel.outbox) == sent_before + 1
     inst = await load(rt, iid)
-    assert inst.wake_reason is None and inst.next_wake_at is None
+    assert inst.wake_reason == "response_timeout"
 
-    # nothing scheduled anymore -> a late duplicate is a no-op
+    # clear it, and a late duplicate delivery is then a no-op
+    async with rt.session_factory() as s, s.begin():
+        locked = await rt.engine._lock_instance(s, iid)
+        await rt.engine.scheduler.clear_wake(locked)
     async with rt.session_factory() as s, s.begin():
         assert await rt.engine.execute_wakeup(s, iid) == "skipped:nothing_scheduled"
     assert "wake_skipped" in await events(rt, iid)
