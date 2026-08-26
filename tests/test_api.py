@@ -382,3 +382,12 @@ async def test_resolving_writes_one_wake_scheduled_not_two(client, rt, seed):
     after = [e for e in (await client.get(f"/api/instances/{iid}")).json()["timeline"] if e["type"] == "wake_scheduled"]
     assert len(after) == before + 1
     assert after[-1]["payload"]["reason"] == "resume_after_requirement"
+
+
+async def test_header_controls_stay_reachable_while_scrolling(client, rt, seed):
+    """The time-travel buttons live in the header and are used while reading a long
+    timeline, so the header has to stay put."""
+    page = (await client.get("/")).text
+    header_css = page.split("header {")[1].split("}")[0]
+    assert "position:sticky" in header_css and "top:0" in header_css
+    assert "z-index" in header_css
