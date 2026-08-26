@@ -240,3 +240,24 @@ async def test_the_brain_is_told_who_it_is_reading(rt, seed):
 
     assert ctx["target_contact_name"] == "Mercy Hospital Records"
     assert ctx["target_contact_role"] == "provider"
+
+
+async def test_the_builder_form_shows_its_defaults(client):
+    """The spec is a plain dict, so `spec.retry_count` is Jinja's Undefined for a new
+    type - which rendered as an empty box instead of the default."""
+    import re
+
+    page = (await client.get("/workflows")).text
+    form = page.split("New workflow type")[1].split("</form>")[0]
+    values = dict(re.findall(r'name="(\w+)"[^>]*?value="([^"]*)"', form, re.S))
+    for field, default in [("retry_count", "2"), ("retry_interval_days", "2"),
+                           ("response_deadline_days", "2"), ("repeat_every_days", "14")]:
+        assert values.get(field) == default, f"{field} rendered {values.get(field)!r}, not its default"
+    assert "keep going" in form, "the cadence box is attached to the radio it belongs to"
+
+
+async def test_editing_a_type_fills_the_form_with_its_spec(client):
+    page = (await client.get("/workflows?edit=client_checkin")).text
+    form = page.split("Edit client_checkin")[1].split("</form>")[0]
+    assert 'value="14"' in form, "the cadence it actually uses"
+    assert "quick check-in" in form and "checked" in form

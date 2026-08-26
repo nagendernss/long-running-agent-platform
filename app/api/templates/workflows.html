@@ -34,7 +34,7 @@
   </div>
 
   <label class="wide">Message
-    <input type="text" name="message" required value="{{ spec.message or '' }}"
+    <input type="text" name="message" required value="{{ spec.get('message', '') }}"
            placeholder="Hi {contact_name}, …">
   </label>
   <p class="dim hint">{% raw %}{contact_name}{% endraw %} is filled in when it sends. Any other
@@ -44,36 +44,43 @@
     <label>Send by
       <select name="channel">
         {% for c in ['sms', 'call', 'email'] %}
-        <option value="{{ c }}" {{ 'selected' if spec.channel == c else '' }}>{{ c }}</option>
+        <option value="{{ c }}" {{ 'selected' if spec.get('channel') == c else '' }}>{{ c }}</option>
         {% endfor %}
       </select>
     </label>
     <label>Contacts a
       <select name="contact_role" title="Who this workflow talks to - the agent brain reads replies differently for a client and a provider">
         {% for r in ['client', 'provider', 'staff'] %}
-        <option value="{{ r }}" {{ 'selected' if spec.contact_role == r else '' }}>{{ r }}</option>
+        <option value="{{ r }}" {{ 'selected' if spec.get('contact_role') == r else '' }}>{{ r }}</option>
         {% endfor %}
       </select>
     </label>
-    <label>Chase<input type="number" name="retry_count" min="0" max="10"
-           value="{{ spec.retry_count if spec.retry_count is not none else 2 }}"> times</label>
-    <label>Waiting<input type="number" name="retry_interval_days" min="1" max="90"
-           value="{{ spec.retry_interval_days if spec.retry_interval_days is not none else 2 }}"> days between</label>
-    <label>Give up after<input type="number" name="response_deadline_days" min="1" max="90"
-           value="{{ spec.response_deadline_days if spec.response_deadline_days is not none else 2 }}"> days of silence</label>
+    <label class="inline">chase<input type="number" name="retry_count" min="0" max="10"
+           value="{{ spec.get('retry_count', 2) }}">times</label>
+    <label class="inline">waiting<input type="number" name="retry_interval_days" min="1" max="90"
+           value="{{ spec.get('retry_interval_days', 2) }}">days apart</label>
+    <label class="inline">after<input type="number" name="response_deadline_days" min="1" max="90"
+           value="{{ spec.get('response_deadline_days', 2) }}">days of silence, chase again</label>
   </div>
 
-  <div class="row">
-    <label class="radio"><input type="radio" name="on_reply" value="complete"
-           {{ 'checked' if spec.on_reply != 'repeat' else '' }}> finish when they reply</label>
-    <label class="radio"><input type="radio" name="on_reply" value="repeat"
-           {{ 'checked' if spec.on_reply == 'repeat' else '' }}> repeat every</label>
-    <label><input type="number" name="repeat_every_days" min="1" max="365"
-           value="{{ spec.repeat_every_days or 14 }}"> days</label>
-  </div>
+  <fieldset class="choice">
+    <legend>When they reply</legend>
+    <label class="radio">
+      <input type="radio" name="on_reply" value="complete"
+             {{ 'checked' if spec.get('on_reply') != 'repeat' else '' }}>
+      finish &mdash; the agent is done
+    </label>
+    <label class="radio">
+      <input type="radio" name="on_reply" value="repeat"
+             {{ 'checked' if spec.get('on_reply') == 'repeat' else '' }}>
+      keep going &mdash; contact them again every
+      <input type="number" name="repeat_every_days" min="1" max="365"
+             value="{{ spec.get('repeat_every_days') or 14 }}"> days
+    </label>
+  </fieldset>
 
   <label class="wide">Hand to a human if the reply mentions
-    <input type="text" name="escalate_keywords" value="{{ (spec.escalate_keywords or [])|join(', ') }}"
+    <input type="text" name="escalate_keywords" value="{{ (spec.get('escalate_keywords') or [])|join(', ') }}"
            placeholder="pain, hospital, another lawyer">
   </label>
 

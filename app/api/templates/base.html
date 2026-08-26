@@ -64,6 +64,14 @@
     form.builder .row { display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; margin-bottom:12px; }
     form.builder label { display:flex; flex-direction:column; gap:4px; font-size:11px;
                          text-transform:uppercase; letter-spacing:.05em; color:var(--dim); }
+    /* a number with its unit reads as one control: "chase [2] times" */
+    form.builder label.inline { flex-direction:row; align-items:baseline; gap:6px; }
+    form.builder fieldset.choice { border:1px solid var(--line); border-radius:8px;
+                                   padding:10px 14px 12px; margin:14px 0; }
+    form.builder fieldset.choice legend { font-size:11px; text-transform:uppercase;
+                                          letter-spacing:.08em; color:var(--dim); padding:0 6px; }
+    form.builder fieldset.choice label.radio { margin:4px 0; }
+    form.builder fieldset.choice input[type=number] { margin:0 4px; }
     form.builder label.wide { display:block; margin-bottom:4px; }
     form.builder label.wide input { width:100%; margin-top:4px; }
     form.builder label.radio { flex-direction:row; align-items:center; gap:6px; text-transform:none;
