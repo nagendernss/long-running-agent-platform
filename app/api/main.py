@@ -432,20 +432,27 @@ def _parse_pairs(text: str) -> dict[str, str]:
     return pairs
 
 
-def _spec_from_form(form) -> dict[str, Any]:
+def _spec_from_form(form, base: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Overlay what the form asks onto whatever the type already had.
+
+    The chase rhythm - how long to wait for a reply, how many follow-ups, how far
+    apart - is not on the form; it comes from the template's defaults. Merging rather
+    than replacing means editing a type in the UI cannot silently drop settings the
+    form does not show, such as an uneven ladder like 1d, 3d.
+    """
     keywords = [k.strip() for k in (form.get("escalate_keywords") or "").split(",") if k.strip()]
     spec: dict[str, Any] = {
+        **(base or {}),
         "message": form.get("message") or "",
         "channel": form.get("channel") or "sms",
-        "retry_count": int(form.get("retry_count") or 0),
-        "retry_interval_days": int(form.get("retry_interval_days") or 2),
-        "response_deadline_days": int(form.get("response_deadline_days") or 2),
         "on_reply": form.get("on_reply") or "complete",
         "contact_role": form.get("contact_role") or "client",
         "escalate_keywords": keywords,
     }
     if spec["on_reply"] == "repeat":
         spec["repeat_every_days"] = int(form.get("repeat_every_days") or 14)
+    else:
+        spec.pop("repeat_every_days", None)
     return spec
 
 
@@ -464,10 +471,14 @@ async def workflows_page(request: Request, edit: str | None = None,
 @app.post("/workflows")
 async def workflows_create(request: Request, runtime: Runtime = Depends(rt)):
     form = await request.form()
+    name = (form.get("name") or "").strip()
+    async with runtime.session_factory() as s:
+        existing = {r.name: r for r in await list_types(s)}.get(name)
     try:  # a form must never 500 on what someone typed
         body = WorkflowTypeIn(
-            name=(form.get("name") or "").strip(), template="outreach",
-            description=(form.get("description") or "").strip() or None, spec=_spec_from_form(form),
+            name=name, template="outreach",
+            description=(form.get("description") or "").strip() or None,
+            spec=_spec_from_form(form, existing.spec if existing else None),
         )
     except (PydanticValidationError, ValueError) as exc:
         return RedirectResponse(f"/workflows?error={_form_error(exc)}", status_code=303)

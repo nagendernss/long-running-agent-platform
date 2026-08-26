@@ -55,13 +55,14 @@
         {% endfor %}
       </select>
     </label>
-    <label class="inline">chase<input type="number" name="retry_count" min="0" max="10"
-           value="{{ spec.get('retry_count', 2) }}">times</label>
-    <label class="inline">waiting<input type="number" name="retry_interval_days" min="1" max="90"
-           value="{{ spec.get('retry_interval_days', 2) }}">days apart</label>
-    <label class="inline">after<input type="number" name="response_deadline_days" min="1" max="90"
-           value="{{ spec.get('response_deadline_days', 2) }}">days of silence, chase again</label>
+
   </div>
+
+  <p class="dim hint">Chasing: waits <strong>{{ spec.get('response_deadline_days', 2) }}</strong>
+     days for a reply, then chases <strong>{{ spec.get('retry_count', 2) }}</strong> more times
+     {% if spec.get('retry_schedule') %}({{ spec.get('retry_schedule')|join(', ') }})
+     {% else %}<strong>{{ spec.get('retry_interval_days', 2) }}</strong> days apart{% endif %},
+     then hands it to a human. Change it in the spec if a workflow needs a different rhythm.</p>
 
   <fieldset class="choice">
     <legend>When they reply</legend>

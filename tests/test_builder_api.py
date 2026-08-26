@@ -154,20 +154,19 @@ async def test_the_builder_page_lists_both_kinds_and_creates_a_type(client, rt):
     r = await client.post("/workflows", data={
         "name": "status_note", "description": "Tell a client something.",
         "message": "Hi {contact_name}, {note}", "channel": "sms",
-        "retry_count": "1", "retry_interval_days": "2", "response_deadline_days": "1",
-        "on_reply": "complete", "escalate_keywords": "angry, complaint",
+        "contact_role": "client", "on_reply": "complete", "escalate_keywords": "angry, complaint",
     })
     assert r.status_code == 303 and r.headers["location"] == "/workflows"
 
     types = {t["name"]: t for t in (await client.get("/api/workflow-types")).json()}
     assert types["status_note"]["spec"]["escalate_keywords"] == ["angry", "complaint"]
-    assert types["status_note"]["retry_policy"] == {"no_answer": {"schedule": ["2d"]}}
+    # the chase rhythm is not on the form; the template's defaults apply
+    assert types["status_note"]["retry_policy"] == {"no_answer": {"schedule": ["2d", "2d"]}}
 
 
 async def test_the_builder_reports_a_bad_spec_instead_of_swallowing_it(client):
     r = await client.post("/workflows", data={
         "name": "bad name!", "message": "hi", "on_reply": "complete",
-        "retry_count": "1", "retry_interval_days": "1", "response_deadline_days": "1",
     })
     assert r.status_code in (303, 422)
 
@@ -175,8 +174,7 @@ async def test_the_builder_reports_a_bad_spec_instead_of_swallowing_it(client):
 async def test_the_start_form_creates_a_contact_and_runs_the_agent(client, rt):
     await client.post("/workflows", data={
         "name": "hearing_note", "message": "Hi {contact_name}, your hearing is {date}.",
-        "channel": "sms", "retry_count": "1", "retry_interval_days": "2",
-        "response_deadline_days": "1", "on_reply": "complete", "escalate_keywords": "",
+        "channel": "sms", "on_reply": "complete", "escalate_keywords": "",
     })
 
     page = (await client.get("/instances/new?workflow_type=hearing_note")).text
@@ -215,8 +213,7 @@ async def test_the_workflow_decides_the_contacts_role_not_the_form(client, rt):
 
     await client.post("/workflows", data={
         "name": "vendor_chase", "message": "Hi {contact_name}", "channel": "email",
-        "contact_role": "provider", "retry_count": "1", "retry_interval_days": "1",
-        "response_deadline_days": "1", "on_reply": "complete", "escalate_keywords": "",
+        "contact_role": "provider", "on_reply": "complete", "escalate_keywords": "",
     })
     r = await client.post("/api/agents", json={
         "workflow_type": "vendor_chase", "contact_name": "Ciox Desk", "email": "desk@ciox.example",
@@ -242,18 +239,51 @@ async def test_the_brain_is_told_who_it_is_reading(rt, seed):
     assert ctx["target_contact_role"] == "provider"
 
 
-async def test_the_builder_form_shows_its_defaults(client):
-    """The spec is a plain dict, so `spec.retry_count` is Jinja's Undefined for a new
-    type - which rendered as an empty box instead of the default."""
-    import re
-
+async def test_the_form_does_not_ask_about_the_chase_rhythm(client):
+    """It used to ask for chases, interval and deadline as three bare numbers, which
+    read as three unrelated settings. The template's defaults cover it; the form just
+    says what they are."""
     page = (await client.get("/workflows")).text
     form = page.split("New workflow type")[1].split("</form>")[0]
-    values = dict(re.findall(r'name="(\w+)"[^>]*?value="([^"]*)"', form, re.S))
-    for field, default in [("retry_count", "2"), ("retry_interval_days", "2"),
-                           ("response_deadline_days", "2"), ("repeat_every_days", "14")]:
-        assert values.get(field) == default, f"{field} rendered {values.get(field)!r}, not its default"
-    assert "keep going" in form, "the cadence box is attached to the radio it belongs to"
+    for field in ("retry_count", "retry_interval_days", "response_deadline_days"):
+        assert f'name="{field}"' not in form, f"{field} is no longer asked"
+    assert "waits" in form and "chases" in form, "but the rhythm is still stated"
+
+
+async def test_a_type_built_without_those_fields_gets_the_defaults(client):
+    r = await client.post("/workflows", data={
+        "name": "plain_note", "message": "Hi {contact_name}", "channel": "sms",
+        "contact_role": "client", "on_reply": "complete", "escalate_keywords": "",
+    })
+    assert r.status_code == 303
+
+    catalog = (await client.get("/api/workflows")).json()
+    assert catalog["plain_note"]["retry_policy"] == {"no_answer": {"schedule": ["2d", "2d"]}}
+    types = {t["name"]: t for t in (await client.get("/api/workflow-types")).json()}
+    assert types["plain_note"]["spec"].get("retry_count") is None, "left to the template default"
+
+
+async def test_editing_from_the_form_keeps_settings_the_form_cannot_show(client):
+    """An uneven ladder like 1d/3d, and the awaiting-state name, no longer appear on
+    the form. Saving an edit must not quietly flatten them."""
+    await client.post("/api/workflow-types", json={
+        "name": "uneven_chase", "template": "outreach",
+        "spec": {"message": "v1", "retry_schedule": ["1d", "3d"], "awaiting_state": "awaiting_ack",
+                 "on_reply": "complete"},
+    })
+
+    r = await client.post("/workflows", data={
+        "name": "uneven_chase", "description": "reworded", "message": "v2",
+        "channel": "sms", "contact_role": "client", "on_reply": "repeat",
+        "repeat_every_days": "21", "escalate_keywords": "pain",
+    })
+    assert r.status_code == 303
+
+    after = {t["name"]: t for t in (await client.get("/api/workflow-types")).json()}["uneven_chase"]
+    assert after["spec"]["retry_schedule"] == ["1d", "3d"], "the hidden ladder survived the edit"
+    assert after["spec"]["awaiting_state"] == "awaiting_ack", "so did the state name"
+    assert after["spec"]["message"] == "v2" and after["spec"]["repeat_every_days"] == 21
+    assert after["retry_policy"] == {"no_answer": {"schedule": ["1d", "3d"]}}
 
 
 async def test_editing_a_type_fills_the_form_with_its_spec(client):
