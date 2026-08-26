@@ -7,6 +7,8 @@ workflow's `handle_domain_signal`.
 from app.signals.base import Signal
 from app.signals.generic import (
     GENERIC_SIGNAL_TYPES,
+    REQUIREMENT_DONE_ACTIONS,
+    ActionRequired,
     EntityUpdate,
     NeedsHuman,
     NoAnswer,
@@ -16,6 +18,8 @@ from app.signals.generic import (
 __all__ = [
     "Signal",
     "GENERIC_SIGNAL_TYPES",
+    "REQUIREMENT_DONE_ACTIONS",
+    "ActionRequired",
     "EntityUpdate",
     "NeedsHuman",
     "NoAnswer",

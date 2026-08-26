@@ -1,8 +1,9 @@
 """Engine: workflow-agnostic orchestrator.
 
 Owns: instance lifecycle, generic-signal handling (RESCHEDULE / NO_ANSWER /
-ENTITY_UPDATE / NEEDS_HUMAN), wake execution (idempotent, fenced), and the
-`WorkflowContext` capability surface handed to workflow definitions.
+ENTITY_UPDATE / ACTION_REQUIRED / NEEDS_HUMAN), wake execution (idempotent,
+fenced), the human-in-the-loop hand-back, and the `WorkflowContext` capability
+surface handed to workflow definitions.
 
 Rule: nothing in this file knows about any concrete workflow. Adding a workflow
 must not touch it.
@@ -26,7 +27,16 @@ from app.events import idempotency_key_exists, log_event
 from app.review import create_review_task
 from app.scheduling.constraints import apply_scheduling_constraints
 from app.scheduling.scheduler import Scheduler
-from app.signals import GENERIC_SIGNAL_TYPES, EntityUpdate, NeedsHuman, NoAnswer, Reschedule, Signal
+from app.signals import (
+    GENERIC_SIGNAL_TYPES,
+    REQUIREMENT_DONE_ACTIONS,
+    ActionRequired,
+    EntityUpdate,
+    NeedsHuman,
+    NoAnswer,
+    Reschedule,
+    Signal,
+)
 from app.retry import resolve_retry_delay
 from app.workflows.base import WorkflowDefinition
 from app.workflows.registry import WorkflowRegistry
@@ -54,6 +64,7 @@ class EngineContext:
         self, instance: WorkflowInstance, contact_id: uuid.UUID | str, body: str, channel: str = "sms"
     ) -> str:
         cid = _uuid(contact_id)
+        channel = await self._resolve_channel(instance, cid, channel)
         field = CHANNEL_ADDRESS_FIELD[channel]
         # Always resolved through the fact store -> corrected numbers are picked up automatically.
         address = await get_entity_field(self.session, "contact", cid, field)
@@ -70,6 +81,21 @@ class EngineContext:
             {"contact_id": str(cid), "channel": channel, "to": address, "body": body, "external_id": external_id},
         )
         return external_id
+
+    async def _resolve_channel(self, instance: WorkflowInstance, contact_id: uuid.UUID, requested: str) -> str:
+        """A contact who said "don't call, email us" has a `preferred_channel` fact.
+        Honour it for every send, so "reach me another way" needs no workflow change.
+        Falls back to the requested channel if the preferred one has no address."""
+        preferred = await get_entity_field(self.session, "contact", contact_id, "preferred_channel")
+        if not preferred or preferred == requested or preferred not in CHANNEL_ADDRESS_FIELD:
+            return requested
+        if not await get_entity_field(self.session, "contact", contact_id, CHANNEL_ADDRESS_FIELD[preferred]):
+            return requested
+        await self.log(
+            instance, "channel_overridden",
+            {"contact_id": str(contact_id), "requested": requested, "used": preferred, "source": "preferred_channel fact"},
+        )
+        return preferred
 
     async def schedule_wake(self, instance: WorkflowInstance, at: datetime, reason: str) -> None:
         await self.engine.scheduler.schedule_wake(self.session, instance, at, reason)
@@ -362,11 +388,50 @@ class Engine:
                     extra={"fact_id": str(fact.id), "field": fact.field, "new_value": fact.new_value},
                 )
 
+        elif isinstance(signal, ActionRequired):
+            # The other party is waiting on US. Park the requirement on the instance so
+            # it survives restarts and shows up in the review queue with its details,
+            # then stop chasing until a human records it as done.
+            requirement = {
+                "action_type": signal.action_type,
+                "summary": signal.summary,
+                "details": signal.details,
+                "evidence": signal.evidence,
+                "requested_at": now.isoformat(),
+            }
+            instance.context = {**instance.context, "pending_requirement": requirement}
+            await ctx.log(instance, "action_required", requirement)
+            if signal.blocks_progress:
+                await self.scheduler.clear_wake(instance)
+                await create_review_task(
+                    session, instance, f"action_required:{signal.action_type}", now=now,
+                    suggested_options=signal.suggested_options or ["mark completed", "close"],
+                    extra={"requirement": requirement},
+                )
+
         elif isinstance(signal, NeedsHuman):
             await create_review_task(session, instance, signal.reason, now=now, suggested_options=signal.suggested_options)
 
         else:  # pragma: no cover - GENERIC_SIGNAL_TYPES and these branches must stay in sync
             raise ValueError(f"generic signal without handler: {signal.type}")
+
+    async def _complete_pending_requirement(
+        self, session: AsyncSession, instance: WorkflowInstance, resolution: dict[str, Any], by: str, now: datetime
+    ) -> bool:
+        """"We paid the fee / submitted the portal form" -> resume outreach, keeping the
+        reference on the instance so the next message can cite it. Generic: the Engine
+        never needs to know what kind of requirement it was."""
+        pending = instance.context.get("pending_requirement")
+        if not pending or resolution.get("action") not in REQUIREMENT_DONE_ACTIONS:
+            return False
+        done = {**pending, "completed_at": now.isoformat(), "completed_by": by, "resolution": resolution}
+        context = {k: v for k, v in instance.context.items() if k != "pending_requirement"}
+        context["completed_requirements"] = [*instance.context.get("completed_requirements", []), done]
+        instance.context = context
+        instance.attempt_count = 0
+        await log_event(session, instance.id, "requirement_completed", done, now=now)
+        await self.scheduler.schedule_wake(session, instance, now, reason="resume_after_requirement")
+        return True
 
     # -- human-in-the-loop (minimal resolve path) ----------------------------------
     async def resolve_review_task(
@@ -389,13 +454,27 @@ class Engine:
         pending = await session.scalar(
             select(func.count()).select_from(ReviewTask).where(ReviewTask.instance_id == instance.id, ReviewTask.status == "pending")
         )
-        if instance.status == "blocked" and not pending:
+        was_blocked = instance.status == "blocked"
+        if was_blocked and not pending:
             instance.status = "active"
         instance.updated_at = now
         await log_event(
             session, instance.id, "review_resolved",
             {"review_task_id": str(task.id), "reason": task.reason, "resolution": resolution, "by": resolved_by}, now=now,
         )
+        await self._complete_pending_requirement(session, instance, resolution, resolved_by, now)
         await self.definition_for(instance).on_review_resolved(instance, task, self.ctx(session))
+        await self._rearm_wake_if_unblocked(session, instance, was_blocked, now)
         await session.flush()
         return task
+
+    async def _rearm_wake_if_unblocked(
+        self, session: AsyncSession, instance: WorkflowInstance, was_blocked: bool, now: datetime
+    ) -> None:
+        """A wake scheduled while the instance was blocked has a durable job that fires
+        into `skipped:status=blocked` and is then gone. Once the last review task
+        clears, re-issue the job so recovery does not depend on the poller."""
+        if not was_blocked or instance.status != "active" or instance.next_wake_at is None:
+            return
+        at = max(instance.next_wake_at, now) if instance.next_wake_at < now else instance.next_wake_at
+        await self.scheduler.schedule_wake(session, instance, at, reason=instance.wake_reason or "resume_after_review")

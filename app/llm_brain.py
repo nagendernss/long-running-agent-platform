@@ -16,6 +16,7 @@ Two things keep this honest for a long-running platform:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Callable, Iterable, Sequence
@@ -25,14 +26,16 @@ from pydantic import ValidationError
 
 from app.agent_brain import AgentBrain, RuleBasedAgentBrain, normalize_phone
 from app.field_registry import FieldRegistry
-from app.signals import EntityUpdate, NeedsHuman, NoAnswer, Reschedule, Signal
+from app.signals import ActionRequired, EntityUpdate, NeedsHuman, NoAnswer, Reschedule, Signal
 
 log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-3.6-flash"
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
+RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+RETRY_DELAYS = (1.0, 4.0)  # short: this runs inside the inbound path
 
-GENERIC_SIGNAL_CLASSES: tuple[type[Signal], ...] = (Reschedule, NoAnswer, EntityUpdate, NeedsHuman)
+GENERIC_SIGNAL_CLASSES: tuple[type[Signal], ...] = (Reschedule, NoAnswer, EntityUpdate, ActionRequired, NeedsHuman)
 
 SIGNAL_GUIDE: dict[str, str] = {
     "RESCHEDULE": "The other party asked us to come back later, or said the thing we want is not ready yet. "
@@ -40,9 +43,19 @@ SIGNAL_GUIDE: dict[str, str] = {
                   "('a couple of weeks' -> 14d, 'end of the month' -> 21d).",
     "NO_ANSWER": "Nobody was reached: voicemail, ringing out, busy line, an empty transcript, an auto-reply "
                  "that carries no information. Do NOT use this when the party actually replied.",
-    "ENTITY_UPDATE": "The message corrects a fact we hold about the contact we are talking to (a phone number, "
-                     "an email address, a preferred contact time). Only the listed fields may be updated. "
-                     "new_value must be the corrected value exactly as given.",
+    "ENTITY_UPDATE": "The message corrects a fact we hold about the contact we are talking to: a phone number, "
+                     "an email address, a preferred contact time, or how they want to be reached "
+                     "(preferred_channel, one of: call, sms, email - use this when they say 'do not phone us, "
+                     "email the request instead'). Only the listed fields may be updated, and new_value must be "
+                     "the corrected value exactly as given. Emit one ENTITY_UPDATE per field.",
+    "ACTION_REQUIRED": "They will not proceed until WE do something first: pay a fee, submit through their "
+                       "portal or a records vendor, send a form or an ID. Set action_type to one of payment, "
+                       "portal_submission, form, document, other, and put a one-line instruction in summary. "
+                       "ALWAYS fill the details object with every particular the message states - amount, "
+                       "currency, payee, url, address, deadline, reference - because a paralegal acts on details "
+                       "alone. Example: 'there is a $45 fee, mail a check to Mercy HIM, 12 Elm St' -> "
+                       "action_type 'payment', details {amount: '$45', payee: 'Mercy HIM', address: '12 Elm St'}. "
+                       "Use this rather than NEEDS_HUMAN whenever the required action is clear.",
     "NEEDS_HUMAN": "A person has to look at this: an explicit request for a human, a threat or complaint, "
                    "anything ambiguous, distressing, or outside the signals listed here. When in doubt, use this.",
 }
@@ -64,13 +77,31 @@ Rules:
 - evidence must be a short verbatim quote from the message.
 - For ENTITY_UPDATE: entity_type is "contact", entity_id is exactly {target_contact_id}, and field must be one of: {writable_fields}.
 - Never invent a value that is not in the message.
-- If the message is unclear, contradictory, or emotionally serious, emit NEEDS_HUMAN rather than guessing."""
+- If the message is unclear, contradictory, or emotionally serious, emit NEEDS_HUMAN rather than guessing.
+- A message can both correct a fact and impose a requirement (for example "we do not take these by phone, email the request to x@y and there is a $45 fee") - emit ENTITY_UPDATE and ACTION_REQUIRED together."""
+
+
+# Gemini's schema subset needs an object's properties spelled out, so a free-form
+# `dict` field (ActionRequired.details) is declared as this fixed set of particulars.
+# Anything outside it still reaches a human through `summary` and `evidence`.
+DETAIL_PROPERTIES: dict[str, Any] = {
+    "amount": {"type": "string"},
+    "currency": {"type": "string"},
+    "payee": {"type": "string"},
+    "url": {"type": "string"},
+    "address": {"type": "string"},
+    "deadline": {"type": "string"},
+    "reference": {"type": "string"},
+    "notes": {"type": "string"},
+}
 
 
 def _json_type(annotation: Any) -> dict[str, Any]:
     text = str(annotation)
     if "list[str]" in text:
         return {"type": "array", "items": {"type": "string"}}
+    if text.startswith("dict") or "dict[" in text:
+        return {"type": "object", "properties": DETAIL_PROPERTIES}
     if "float" in text:
         return {"type": "number"}
     if "int" in text and "str" not in text:
@@ -80,28 +111,36 @@ def _json_type(annotation: Any) -> dict[str, Any]:
     return {"type": "string"}
 
 
-def build_response_schema(signal_classes: Sequence[type[Signal]]) -> dict[str, Any]:
-    """One flat envelope covering every allowed signal, with `type` as the discriminator.
-
-    A per-class anyOf would be more precise, but flat + discriminator is the shape
-    every provider's structured-output mode supports, and validation happens against
-    the real Pydantic model on the way back anyway.
-    """
+def _class_schema(cls: type[Signal]) -> dict[str, Any]:
+    """One schema variant per signal class, carrying that class's own required fields."""
     properties: dict[str, Any] = {
-        "type": {"type": "string", "enum": [c.model_fields["type"].default for c in signal_classes]},
+        "type": {"type": "string", "enum": [cls.model_fields["type"].default]},
         "confidence": {"type": "number"},
         "evidence": {"type": "string"},
     }
-    for cls in signal_classes:
-        for name, field in cls.model_fields.items():
-            if name in ("type", "confidence", "evidence") or name in properties:
-                continue
-            properties[name] = _json_type(field.annotation)
+    required = ["type", "confidence", "evidence"]
+    for name, field in cls.model_fields.items():
+        if name in properties:
+            continue
+        properties[name] = _json_type(field.annotation)
+        # `details` carries the particulars a paralegal acts on, so require it even
+        # though the Python model defaults it to {}.
+        if field.is_required() or name == "details":
+            required.append(name)
+    return {"type": "object", "properties": properties, "required": required}
+
+
+def build_response_schema(signal_classes: Sequence[type[Signal]]) -> dict[str, Any]:
+    """A discriminated union: one variant per signal, each with its own required fields.
+
+    A single flat envelope was tried first and failed in practice - the model split
+    one ACTION_REQUIRED across two objects (identity in the first, `details` in the
+    second), and the half without `action_type` was dropped on validation. Per-class
+    `required` makes that shape impossible to emit.
+    """
     return {
         "type": "object",
-        "properties": {"signals": {"type": "array", "items": {
-            "type": "object", "properties": properties, "required": ["type", "confidence", "evidence"],
-        }}},
+        "properties": {"signals": {"type": "array", "items": {"anyOf": [_class_schema(c) for c in signal_classes]}}},
         "required": ["signals"],
     }
 
@@ -149,6 +188,7 @@ class GeminiAgentBrain:
         fallback: AgentBrain | None = None,
         timeout: float = 30.0,
         client: httpx.AsyncClient | None = None,
+        retry_delays: Sequence[float] = RETRY_DELAYS,
     ):
         self.api_key = api_key
         self.model = model
@@ -157,6 +197,7 @@ class GeminiAgentBrain:
         self.fallback = fallback or RuleBasedAgentBrain()
         self.timeout = timeout
         self._client = client
+        self._retry_delays = tuple(retry_delays)
         self.last_source: str | None = None  # "gemini" | "fallback" - handy in logs/tests
 
     def signal_classes(self, workflow_type: str) -> list[type[Signal]]:
@@ -177,6 +218,32 @@ class GeminiAgentBrain:
             signal_guide="\n".join(lines),
             writable_fields=", ".join(self._writable_fields),
         )
+
+    async def _call_with_retry(self, prompt: str, message_text: str, schema: dict[str, Any]) -> dict[str, Any]:
+        """Rate limits and 5xx are transient; falling straight back to keyword matching
+        on a 429 would quietly downgrade extraction quality. Retry a couple of times
+        (honouring Retry-After when the provider sends one), then give up to the
+        fallback rather than hold the inbound transaction open any longer."""
+        last: Exception | None = None
+        for attempt in range(len(self._retry_delays) + 1):
+            try:
+                return await self._call(prompt, message_text, schema)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code not in RETRY_STATUSES or attempt == len(self._retry_delays):
+                    raise
+                last = exc
+                delay = self._retry_delays[attempt]
+                retry_after = exc.response.headers.get("retry-after")
+                if retry_after and retry_after.isdigit():
+                    delay = min(float(retry_after), 10.0)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if attempt == len(self._retry_delays):
+                    raise
+                last = exc
+                delay = self._retry_delays[attempt]
+            log.info("gemini call failed (%s), retrying in %.1fs", type(last).__name__, delay)
+            await asyncio.sleep(delay)
+        raise last  # unreachable, keeps type checkers happy
 
     async def _call(self, prompt: str, message_text: str, schema: dict[str, Any]) -> dict[str, Any]:
         body = {
@@ -205,7 +272,9 @@ class GeminiAgentBrain:
 
         classes = self.signal_classes(workflow_context.get("workflow_type", ""))
         try:
-            payload = await self._call(self._prompt(workflow_context, classes), text, build_response_schema(classes))
+            payload = await self._call_with_retry(
+                self._prompt(workflow_context, classes), text, build_response_schema(classes)
+            )
             signals = parse_signals(payload, classes, workflow_context)
             if signals:
                 self.last_source = "gemini"

@@ -80,7 +80,7 @@ def test_field_registry_threshold_lookup():
 
 
 def test_generic_signal_types_are_the_engine_routing_key():
-    assert GENERIC_SIGNAL_TYPES == {"RESCHEDULE", "NO_ANSWER", "ENTITY_UPDATE", "NEEDS_HUMAN"}
+    assert GENERIC_SIGNAL_TYPES == {"RESCHEDULE", "NO_ANSWER", "ENTITY_UPDATE", "ACTION_REQUIRED", "NEEDS_HUMAN"}
 
 
 async def test_low_confidence_fact_is_proposed_and_reviewed(rt, seed):

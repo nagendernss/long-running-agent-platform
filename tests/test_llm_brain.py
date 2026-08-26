@@ -44,24 +44,33 @@ def gemini_reply(signals: list[dict]) -> httpx.Response:
 
 
 # ---------------------------------------------------------------- schema
+def variants(schema: dict) -> dict[str, dict]:
+    return {v["properties"]["type"]["enum"][0]: v for v in schema["properties"]["signals"]["items"]["anyOf"]}
+
+
 def test_schema_is_generated_from_the_workflow_not_hardcoded():
-    medical = build_response_schema([*(), RecordsReceived, AuthRequired, RequestDenied])
-    types = medical["properties"]["signals"]["items"]["properties"]["type"]["enum"]
-    assert types == ["RECORDS_RECEIVED", "AUTH_REQUIRED", "REQUEST_DENIED"]
+    medical = build_response_schema([RecordsReceived, AuthRequired, RequestDenied])
+    assert list(variants(medical)) == ["RECORDS_RECEIVED", "AUTH_REQUIRED", "REQUEST_DENIED"]
 
     brain = stub_brain(lambda r: gemini_reply([]))
-    generic = ["RESCHEDULE", "NO_ANSWER", "ENTITY_UPDATE", "NEEDS_HUMAN"]
+    generic = ["RESCHEDULE", "NO_ANSWER", "ENTITY_UPDATE", "ACTION_REQUIRED", "NEEDS_HUMAN"]
     assert [c.model_fields["type"].default for c in brain.signal_classes("medical_records_followup")] == generic + [
         "RECORDS_RECEIVED", "AUTH_REQUIRED", "REQUEST_DENIED",
     ]
     assert [c.model_fields["type"].default for c in brain.signal_classes("client_checkin")] == generic + [
         "CLIENT_FLAG", "CHECKIN_OK",
     ]
-    # union of every signal's own fields, correctly typed
-    props = build_response_schema(brain.signal_classes("medical_records_followup"))["properties"]["signals"]["items"]["properties"]
-    assert props["wait_duration"] == {"type": "string"}
-    assert props["confidence"] == {"type": "number"}
-    assert props["suggested_options"] == {"type": "array", "items": {"type": "string"}}
+    # each variant carries its own fields, correctly typed, with its own required list
+    v = variants(build_response_schema(brain.signal_classes("medical_records_followup")))
+    assert v["RESCHEDULE"]["properties"]["wait_duration"] == {"type": "string"}
+    assert v["RESCHEDULE"]["required"] == ["type", "confidence", "evidence", "wait_duration"]
+    assert v["NEEDS_HUMAN"]["properties"]["suggested_options"] == {"type": "array", "items": {"type": "string"}}
+    assert v["NO_ANSWER"]["required"] == ["type", "confidence", "evidence"]
+    # ActionRequired.details is a dict -> a spelled-out object, and required, so the
+    # model cannot emit the identity of a requirement without its particulars.
+    details = v["ACTION_REQUIRED"]["properties"]["details"]
+    assert details["type"] == "object" and "amount" in details["properties"]
+    assert set(v["ACTION_REQUIRED"]["required"]) >= {"action_type", "summary", "details"}
 
 
 def test_prompt_carries_workflow_state_and_writable_fields():
@@ -129,7 +138,10 @@ async def test_request_shape_is_what_the_api_expects():
     assert seen["key"] == "test-key"
     cfg = seen["body"]["generationConfig"]
     assert cfg["responseMimeType"] == "application/json" and cfg["temperature"] == 0
-    assert cfg["responseSchema"]["properties"]["signals"]["items"]["properties"]["type"]["enum"]
+    assert list(variants(cfg["responseSchema"])) == [
+        "RESCHEDULE", "NO_ANSWER", "ENTITY_UPDATE", "ACTION_REQUIRED", "NEEDS_HUMAN",
+        "RECORDS_RECEIVED", "AUTH_REQUIRED", "REQUEST_DENIED",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -143,17 +155,57 @@ async def test_request_shape_is_what_the_api_expects():
     ids=["http_500", "rate_limited", "bad_json", "empty_result"],
 )
 async def test_falls_back_to_rules_instead_of_losing_the_message(responder):
-    brain = stub_brain(responder)
+    brain = stub_brain(responder, retry_delays=(0.0,))
     signals = await brain.extract_signals("no answer, went to voicemail", CTX)
     assert brain.last_source == "fallback"
     assert [s.type for s in signals] == ["NO_ANSWER"]
+
+
+async def test_transient_failures_are_retried_before_giving_up():
+    """A 429 should not silently downgrade extraction to keyword matching."""
+    calls = {"n": 0}
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(429, json={"error": "rate limited"}, headers={"retry-after": "0"})
+        return gemini_reply([{"type": "RESCHEDULE", "confidence": 0.9, "evidence": "two weeks", "wait_duration": "14d"}])
+
+    brain = stub_brain(flaky, retry_delays=(0.0, 0.0))
+    signals = await brain.extract_signals("call us back in two weeks", CTX)
+    assert calls["n"] == 3 and brain.last_source == "gemini"
+    assert [s.type for s in signals] == ["RESCHEDULE"]
+
+
+async def test_retries_are_bounded_then_it_falls_back():
+    calls = {"n": 0}
+
+    def always_429(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(429, json={"error": "rate limited"})
+
+    brain = stub_brain(always_429, retry_delays=(0.0, 0.0))
+    assert [s.type for s in await brain.extract_signals("no answer", CTX)] == ["NO_ANSWER"]
+    assert calls["n"] == 3 and brain.last_source == "fallback"
+
+
+async def test_client_errors_are_not_retried():
+    calls = {"n": 0}
+
+    def bad_key(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(401, json={"error": "invalid key"})
+
+    brain = stub_brain(bad_key, retry_delays=(0.0, 0.0))
+    assert [s.type for s in await brain.extract_signals("no answer", CTX)] == ["NO_ANSWER"]
+    assert calls["n"] == 1, "a bad API key must not be retried"
 
 
 async def test_transport_error_falls_back():
     def boom(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("dns", request=request)
 
-    brain = stub_brain(boom)
+    brain = stub_brain(boom, retry_delays=(0.0,))
     assert [s.type for s in await brain.extract_signals("records are attached", CTX)] == ["RECORDS_RECEIVED"]
     assert brain.last_source == "fallback"
 
@@ -183,6 +235,29 @@ async def test_engine_runs_with_the_llm_brain(rt, seed):
 
 
 # ---------------------------------------------------------------- live (opt in)
+@pytest.mark.live
+@pytest.mark.skipif(not os.environ.get("GEMINI_API_KEY"), reason="GEMINI_API_KEY not set")
+async def test_live_gemini_extracts_a_payment_requirement_with_particulars():
+    """The case that drove the discriminated-union schema: a fee with an amount and a
+    payee must arrive as structured details, not prose."""
+    brain = GeminiAgentBrain(
+        os.environ["GEMINI_API_KEY"],
+        model=os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"),
+        domain_signals_for=lambda wt: REGISTRY.get(wt).domain_signals,
+        field_registry=FIELDS,
+    )
+    signals = await brain.extract_signals(
+        "There is a $45 records fee. Mail a check to Mercy Health Information Management, "
+        "12 Elm St, or pay online at pay.mercy.example. We release the records once payment clears.",
+        CTX,
+    )
+    assert brain.last_source == "gemini"
+    req = next(s for s in signals if s.type == "ACTION_REQUIRED")
+    assert req.action_type == "payment" and req.blocks_progress is True
+    blob = " ".join(str(v) for v in req.details.values()).lower()
+    assert "45" in blob and "mercy" in blob
+
+
 @pytest.mark.live
 @pytest.mark.skipif(not os.environ.get("GEMINI_API_KEY"), reason="GEMINI_API_KEY not set")
 async def test_live_gemini_extracts_signals():

@@ -15,7 +15,7 @@ from typing import Any, ClassVar, Literal, Optional
 
 from app.agent_brain import KeywordRule, rule
 from app.db.models import ReviewTask, WorkflowInstance
-from app.signals import NoAnswer, Reschedule, Signal
+from app.signals import ActionRequired, NoAnswer, Reschedule, Signal
 from app.workflows.base import BaseWorkflow, WorkflowContext
 
 
@@ -75,6 +75,11 @@ class MedicalRecordsFollowupWorkflow(BaseWorkflow):
         body = f"Hi {provider}, following up on the medical records request for {client}. Could you send them over at your earliest convenience?"
         if c.get("auth_obtained"):
             body += " The signed HIPAA authorization is attached."
+        done = (c.get("completed_requirements") or [])
+        if done:  # cite what we did, so they cannot ask us for it twice
+            last = done[-1]
+            ref = (last.get("resolution") or {}).get("reference")
+            body += f" Note: {last.get('summary')} - completed on our side" + (f" (ref {ref})." if ref else ".")
         await ctx.send(instance, c["provider_contact_id"], body, channel=c.get("provider_channel", "call"))
         await ctx.transition(instance, "awaiting_reply")
 
@@ -109,7 +114,17 @@ class MedicalRecordsFollowupWorkflow(BaseWorkflow):
             return
         provider = await ctx.contact_name(c["provider_contact_id"])
         channel = c.get("client_channel", "sms")
-        if isinstance(signal, NoAnswer):
+        if isinstance(signal, ActionRequired):
+            what = signal.summary
+            amount = (signal.details or {}).get("amount")
+            detail = f" ({amount})" if amount and amount not in what else ""
+            await ctx.send(
+                instance, client_id,
+                f"Update: {provider} needs something from us before releasing your records - {what}{detail}. "
+                "Our team is handling it and we'll follow up.",
+                channel=channel,
+            )
+        elif isinstance(signal, NoAnswer):
             if instance.status == "blocked":
                 body = f"We've tried {instance.attempt_count + 1} times to reach {provider} for your records without success. A team member is taking over personally."
             else:

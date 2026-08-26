@@ -22,7 +22,8 @@ inbound message / call transcript
         |
         v
 2. Engine               app/engine.py            workflow-AGNOSTIC orchestrator
-   |- generic signals   RESCHEDULE / NO_ANSWER / ENTITY_UPDATE / NEEDS_HUMAN   -> handled here
+   |- generic signals   RESCHEDULE / NO_ANSWER / ENTITY_UPDATE /
+   |                    ACTION_REQUIRED / NEEDS_HUMAN                          -> handled here
    |- domain signals    RECORDS_RECEIVED, CLIENT_FLAG, ...                     -> forwarded down
         |
         v
@@ -37,7 +38,7 @@ Supporting pieces the Engine owns, all generic:
 | Business-hours / timezone clamp | `app/scheduling/constraints.py` | compliance window is a **stub** |
 | Retry policy resolution | `app/retry.py` | policy is data on the workflow, not code |
 | Versioned fact write-back | `app/write_back.py`, `app/db/facts.py` | gated by `config/field_registry.yaml` |
-| Human-in-the-loop | `app/review.py` | `review_task` + resolve path |
+| Human-in-the-loop | `app/review.py`, `Engine._complete_pending_requirement` | `review_task`, resolve, and requirement hand-back |
 | Channels | `app/channels/` | `MockChannel`; real telephony/email plugs in here |
 | Agent Brain | `app/agent_brain.py`, `app/llm_brain.py` | keyword baseline + Gemini, chosen by config |
 | Audit trail | `app/events.py` | append-only `event` table, monotonic `seq` |
@@ -84,12 +85,19 @@ Three guard rails, because a model is not a trusted input:
   by a validator on the signal model itself (`"two weeks"` → `2w`, `"14d …notes"` →
   `14d`, `"sometime soon"` → rejected). A live run really did return
   `"14dPool filter set / schedule follow up in 2 weeks"`; the scheduler never saw it.
-- **It cannot lose a message.** Any HTTP error, timeout, malformed JSON or empty
-  extraction falls back to the rule brain; if that finds nothing either, the Engine
-  raises `NEEDS_HUMAN`. A 429 during a live demo run was absorbed this way and the
-  run still passed every assertion.
+- **It cannot lose a message.** Rate limits and 5xx are retried briefly (honouring
+  `Retry-After`; a 401 is not retried), then any remaining error, timeout, malformed
+  JSON or empty extraction falls back to the rule brain; if that finds nothing either,
+  the Engine raises `NEEDS_HUMAN`. A 429 during a live demo run was absorbed this way
+  and the run still passed every assertion.
 
-**The demo is the working slice** — 12 steps, virtual clock, every step asserted:
+The response schema is a discriminated union — one variant per signal with its own
+required fields — not one flat envelope. The flat version was tried first and failed
+against the real API: the model split a single `ACTION_REQUIRED` across two objects,
+identity in one and `details` in the other, and the half without `action_type` was
+dropped on validation. Per-variant `required` makes that shape impossible to emit.
+
+**The demo is the working slice** — 14 steps, virtual clock, every step asserted:
 
 ```bash
 python scripts/demo.py                        # embedded Postgres, brain from .env
@@ -101,8 +109,8 @@ python scripts/demo.py --db postgresql://...  # against your own Postgres
 Tests (spin up an embedded Postgres, run a real Procrastinate worker):
 
 ```bash
-python -m pytest -q                  # 44 passed - fully offline (stubbed HTTP, embedded Postgres)
-python -m pytest -m live -o addopts=""   # 1 more: hits the real Gemini API, needs GEMINI_API_KEY
+python -m pytest -q                      # 54 passed - fully offline (stubbed HTTP, embedded Postgres)
+python -m pytest -m live -o addopts=""   # 2 more: hit the real Gemini API, need GEMINI_API_KEY
 ```
 
 API + dashboard, and the durable worker:
@@ -127,6 +135,8 @@ python scripts/worker.py                    # executes scheduled wake-ups
 | 7 | Three no-answers follow the declared `2d / 5d / 14d` ladder; the 4th exhausts it → `review_task`, `status = blocked`, client told a human is taking over |
 | 8 | Staff resolve the task → instance unblocks, attempts reset, outreach resumes |
 | 9 | Provider needs a signed HIPAA authorization → client notified, staff task raised; after resolution the provider is re-contacted *with* the auth |
+| 9b | "$45 records fee, pay online first" → requirement parked, chasing stops, client told what is holding their records up, staff get a task carrying the amount and URL |
+| 9c | Paralegal resolves it with `{"action": "paid", "reference": "chk-1041"}` → instance resumes and the next message to the provider cites the reference |
 | 10 | Records received → client notified, instance completed; full audit trail printed |
 | 11 | `client_checkin` runs on the same engine: 14-day cadence, and a concerning reply ("the pain is getting worse") raises a staff flag |
 | 12 | Client updates their own email mid-workflow through the same generic write-back path |
@@ -171,6 +181,59 @@ single workflow name in it.
 **The brain interface is async.** `extract_signals` returns an awaitable because a
 real brain does I/O. That was the only downstream change needed when the LLM landed —
 one `await` in `Engine.handle_inbound`.
+
+---
+
+## When the other party wants something from us
+
+Third parties rarely just say yes. They say *"there's a $45 records fee"*, *"submit it
+through the Ciox portal"*, *"we don't take these by phone — email the request"*, *"fax
+us the letter of representation"*. All of that is generic: the ball moves to our court,
+a human has to act, and then the agent should resume **knowing what we did**.
+
+That is the `ACTION_REQUIRED` signal:
+
+```python
+ActionRequired(
+    action_type="payment",                     # payment | portal_submission | form | document | other
+    summary="$45 records fee before release",
+    details={"amount": "$45", "payee": "Mercy Health Information Management",
+             "url": "pay.mercy.example"},      # what a paralegal actually acts on
+    blocks_progress=True,
+)
+```
+
+The Engine then, for any workflow:
+
+1. parks the requirement on `instance.context["pending_requirement"]` so it survives a
+   restart and is queryable;
+2. stops chasing (`clear_wake`, `status = blocked`) — no point calling someone who is
+   waiting on us;
+3. raises a `review_task` named `action_required:payment` carrying the structured
+   details, so the queue shows the amount and the payee rather than a sentence;
+4. lets the workflow tell the client *why* their matter is paused (`on_generic_outcome`).
+
+A human then resolves the task with `{"action": "paid", "reference": "chk-1041"}`
+(`completed` / `done` / `paid` / `submitted` all count). The Engine moves the
+requirement into `completed_requirements`, resets the attempt counter, and schedules an
+immediate wake with reason `resume_after_requirement`. The next outreach can cite the
+reference — the medical-records workflow appends *"payment required before release —
+completed on our side (ref chk-1041)"*, so the provider cannot ask twice.
+
+`blocks_progress=False` records an advisory requirement ("send an ID when convenient")
+without stalling the retry ladder.
+
+**"Don't call us, email us"** is handled a layer lower, as a fact rather than a
+requirement. `preferred_channel` is a registry field like any other, and every
+`ctx.send` resolves the channel through the fact store before picking an address. So
+one `ENTITY_UPDATE` reroutes every future message to that contact, and the workflow —
+which still says `channel="call"` — never changes. If the preferred channel has no
+address on file, the requested channel is used instead, and the switch is logged as
+`channel_overridden`.
+
+Both brains handle these. The LLM extracts them with full particulars; the keyword
+fallback recognises the common phrasings (fees, portals/vendors, "no phone requests"),
+which matters because the fallback is exactly what runs during a provider outage.
 
 ---
 

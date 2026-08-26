@@ -5,5 +5,7 @@ contact:
   phone: { auto_apply_threshold: 0.85 }
   email: { auto_apply_threshold: 0.85 }
   preferred_contact_time: { auto_apply_threshold: 0.6 }
+  # "don't call us, email us" - every outbound send resolves the channel through this
+  preferred_channel: { auto_apply_threshold: 0.8 }
 case_record:
   matter_type: { auto_apply_threshold: 0.9 }

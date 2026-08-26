@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from app.clock import duration_from_words
-from app.signals import EntityUpdate, NeedsHuman, NoAnswer, Reschedule, Signal
+from app.signals import ActionRequired, EntityUpdate, NeedsHuman, NoAnswer, Reschedule, Signal
 
 
 class AgentBrain(Protocol):
@@ -35,6 +35,8 @@ def rule(name: str, pattern: str, build: Callable[..., Signal | None]) -> Keywor
 # --- helpers -----------------------------------------------------------------------
 PHONE_RE = re.compile(r"(?<!\d)(\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\d{3}[\s.-]\d{4})(?!\d)")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+AMOUNT_RE = re.compile(r"[$£€]\s?\d+(?:[.,]\d{2})?")
+URL_RE = re.compile(r"\b(?:https?://)?(?:[\w-]+\.)+(?:com|org|net|gov|edu|example)(?:/\S*)?", re.IGNORECASE)
 
 
 def normalize_phone(raw: str) -> str:
@@ -70,9 +72,49 @@ def _entity_update_email(m: re.Match[str], text: str, ctx: dict[str, Any]) -> Si
         entity_type="contact",
         entity_id=str(target),
         field="email",
-        new_value=m.group("email").lower(),
+        new_value=m.group("email").lower().rstrip(".,;:)"),  # sentence punctuation is not part of the address
         confidence=0.9,
         evidence=m.group(0),
+    )
+
+
+def _payment_required(m: re.Match[str], text: str, ctx: dict[str, Any]) -> Signal | None:
+    amount = AMOUNT_RE.search(text)
+    url = URL_RE.search(text)
+    details = {k: v for k, v in {"amount": amount.group(0) if amount else None,
+                                 "url": url.group(0) if url else None}.items() if v}
+    return ActionRequired(
+        action_type="payment",
+        summary=f"payment required before release{f' ({amount.group(0)})' if amount else ''}",
+        details=details,
+        suggested_options=["pay fee", "close"],
+        confidence=0.8,
+        evidence=m.group(0),
+    )
+
+
+def _portal_required(m: re.Match[str], text: str, ctx: dict[str, Any]) -> Signal | None:
+    url = URL_RE.search(text)
+    return ActionRequired(
+        action_type="portal_submission",
+        summary="request must be submitted through their portal or records vendor",
+        details={"url": url.group(0)} if url else {},
+        suggested_options=["submit via portal", "call vendor"],
+        confidence=0.75,
+        evidence=m.group(0),
+    )
+
+
+def _preferred_channel(m: re.Match[str], text: str, ctx: dict[str, Any]) -> Signal | None:
+    target = ctx.get("target_contact_id")
+    if not target:
+        return None
+    # the phrase that matched is usually the refusal ("we don't take these by phone");
+    # the replacement channel is stated elsewhere in the message.
+    channel = "email" if (EMAIL_RE.search(text) or re.search(r"\bemail\b", text, re.IGNORECASE)) else "sms"
+    return EntityUpdate(
+        entity_type="contact", entity_id=str(target), field="preferred_channel", new_value=channel,
+        confidence=0.85, evidence=m.group(0),
     )
 
 
@@ -87,13 +129,30 @@ def _reschedule(m: re.Match[str], text: str, ctx: dict[str, Any]) -> Signal | No
 
 GENERIC_RULES: list[KeywordRule] = [
     rule(
+        "payment_required",
+        r"\b((records|processing|copying|retrieval) fee|there is a fee|fee of|invoice|prepayment|payment (is )?(required|due)|pay(ment)? (before|first)|mail a check)\b",
+        _payment_required,
+    ),
+    rule(
+        "portal_required",
+        r"\b((vendor|records|request) portal|through (our|the) portal|submit (it )?(online|through|via)|release of information vendor|ciox|verisma|sharecare)\b",
+        _portal_required,
+    ),
+    rule(
+        "preferred_channel",
+        r"\b((do not|don'?t|can'?t|cannot|we do not) (take|accept|handle) (these|this|requests?)?\s*(over the phone|by phone|by fax)|email (the|your) request (to|instead)|please email (us|it)|no phone requests)\b",
+        _preferred_channel,
+    ),
+    rule(
         "wrong_number",
         r"\b(wrong number|new number|number (has )?changed|reach (me|us|him|her|them) at|call (me|us) at)\b",
         _entity_update_phone,
     ),
     rule(
         "new_email",
-        r"\b(email( address)?( is| to)?|reach (me|us) at)\s*:?\s*(?P<email>[\w.+-]+@[\w-]+\.[\w.-]+)",
+        # any address the other party volunteers: "email the request to x@y",
+        # "our address is x@y", "reach us at x@y"
+        r"(?P<email>[\w.+-]+@[\w-]+\.[\w.-]+)",
         _entity_update_email,
     ),
     rule(
@@ -130,14 +189,19 @@ class RuleBasedAgentBrain:
 
         rules = list(GENERIC_RULES) + list(self._domain_rules_for(workflow_context.get("workflow_type", "")))
         signals: list[Signal] = []
-        seen: set[str] = set()
+        seen: set[tuple[str, str]] = set()
         for r in rules:
             m = r.pattern.search(text)
             if not m:
                 continue
             sig = r.build(m, text, workflow_context)
-            if sig is None or sig.type in seen:
+            if sig is None:
                 continue
-            seen.add(sig.type)
+            # keyed by (type, field) so "email us instead, at roi@..." can yield both a
+            # preferred_channel change and an address change
+            key = (sig.type, getattr(sig, "field", ""))
+            if key in seen:
+                continue
+            seen.add(key)
             signals.append(sig)
         return signals

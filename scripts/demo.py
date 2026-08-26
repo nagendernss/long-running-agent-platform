@@ -223,6 +223,29 @@ async def main(db_url: str | None) -> None:
         sent = drain(rt)
         check(any("HIPAA authorization is attached" in m.body for m in sent), "after the client signs, the provider is re-contacted WITH the authorization")
 
+        # --------------------------- 9b. the provider wants something from US first
+        step("9b", "Provider demands a records fee -> we owe them -> a human pays -> outreach resumes")
+        await inbound(rt, iid, "There is a $45 records fee. Pay online at pay.mercy.example before we release anything.", channel="email")
+        inst = await instance(rt, iid)
+        sent = drain(rt)
+        req = inst.context.get("pending_requirement") or {}
+        check(req.get("action_type") == "payment", f"requirement parked on the instance: {req.get('summary')} {req.get('details')}")
+        check(inst.status == "blocked" and inst.next_wake_at is None, "stopped chasing while the ball is in our court")
+        check(any("$45" in m.body and m.address == "+15550001" for m in sent), "client told what is holding their records up")
+        tasks = await pending_reviews(rt, iid)
+        fee_task = [t for t in tasks if t.reason.startswith("action_required:")][0]
+        check(True, f"review_task '{fee_task.reason}' with details {fee_task.context_snapshot['requirement']['details']}")
+
+        step("9c", "Paralegal records the payment with a reference -> agent resumes and cites it")
+        async with rt.session_factory() as s, s.begin():
+            await rt.engine.resolve_review_task(s, fee_task.id, {"action": "paid", "reference": "chk-1041"}, resolved_by="paralegal@firm")
+        inst = await instance(rt, iid)
+        check(inst.status == "active" and "pending_requirement" not in inst.context, "requirement cleared, instance active again")
+        check(inst.context["completed_requirements"][-1]["resolution"]["reference"] == "chk-1041", "reference kept on the instance")
+        await tick(rt)
+        sent = drain(rt)
+        check(any("chk-1041" in m.body for m in sent), "next message to the provider cites the payment reference")
+
         # -------------------------------------------------- 10. records received
         step("10", "Provider sends the records -> client notified, instance completed")
         await inbound(rt, iid, "Here are the records, sent over by fax this morning", channel="email")
