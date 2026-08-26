@@ -3,13 +3,26 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
+from pydantic import field_validator
+
+from app.clock import coerce_duration
 from app.signals.base import Signal
 
 
 class Reschedule(Signal):
     type: Literal["RESCHEDULE"] = "RESCHEDULE"
-    wait_duration: str  # e.g. "14d", "2h"
+    wait_duration: str  # canonical compact form: "30m", "2h", "14d", "3w"
     reason: Optional[str] = None
+
+    @field_validator("wait_duration")
+    @classmethod
+    def _canonical_duration(cls, value: str) -> str:
+        """The scheduler assumes the compact form, so normalise here and reject what
+        cannot be read. Keeps a sloppy brain from reaching the scheduler."""
+        coerced = coerce_duration(value)
+        if coerced is None:
+            raise ValueError(f"unparseable wait_duration: {value!r}")
+        return coerced
 
 
 class NoAnswer(Signal):

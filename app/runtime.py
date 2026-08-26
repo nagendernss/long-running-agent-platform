@@ -10,7 +10,7 @@ import asyncpg
 import procrastinate
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.agent_brain import RuleBasedAgentBrain
+from app.agent_brain import AgentBrain, RuleBasedAgentBrain
 from app.channels import Channel, MockChannel
 from app.clock import Clock, SystemClock
 from app.config import Settings, get_settings
@@ -21,6 +21,25 @@ from app.field_registry import FieldRegistry
 from app.scheduling.scheduler import Scheduler, make_procrastinate_app
 from app.workflows.registry import WorkflowRegistry, default_registry
 from app.write_back import WriteBackResolver
+
+
+def build_brain(settings: Settings, registry: WorkflowRegistry, field_registry: FieldRegistry) -> AgentBrain:
+    """Pick the Agent Brain from config. Both implementations get their workflow
+    knowledge injected from the registry, so neither imports a workflow module."""
+    rules = RuleBasedAgentBrain(domain_rules_for=lambda wt: registry.get(wt).keyword_rules)
+    if settings.agent_brain != "gemini":
+        return rules
+    if not settings.gemini_api_key:
+        raise RuntimeError("AGENT_BRAIN=gemini but GEMINI_API_KEY is not set")
+    from app.llm_brain import GeminiAgentBrain  # imported lazily: httpx only needed for this path
+
+    return GeminiAgentBrain(
+        settings.gemini_api_key,
+        model=settings.gemini_model,
+        domain_signals_for=lambda wt: registry.get(wt).domain_signals,
+        field_registry=field_registry,
+        fallback=rules,
+    )
 
 
 @dataclass
@@ -100,7 +119,7 @@ async def build_runtime(
     scheduler.durable = pq_app is not None
 
     field_registry = FieldRegistry.load(settings.field_registry_path)
-    brain = RuleBasedAgentBrain(domain_rules_for=lambda wt: registry.get(wt).keyword_rules)
+    brain = build_brain(settings, registry, field_registry)
     engine = Engine(
         session_factory=session_factory,
         clock=clock,

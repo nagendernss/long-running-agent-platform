@@ -45,3 +45,7 @@ class FieldRegistry:
 
     def is_writable(self, entity_type: str, field: str) -> bool:
         return (entity_type, field) in self._policies
+
+    def field_names(self) -> set[str]:
+        """Every writable field name - used to constrain what the Agent Brain may propose."""
+        return {field for _entity_type, field in self._policies}

@@ -18,11 +18,18 @@ from app.workflows.base import BaseWorkflow, WorkflowContext
 
 
 class ClientFlag(Signal):
+    """The client reports something a person must see: worsening injury or pain, a
+    hospital or surgery, mental-health distress, or dissatisfaction with the firm.
+    `reason` is a short lowercase tag such as "pain" or "considering another firm"."""
+
     type: Literal["CLIENT_FLAG"] = "CLIENT_FLAG"
     reason: str
 
 
 class CheckinOk(Signal):
+    """The client replied and nothing is wrong - fine, no change, all good. Schedules
+    the next check-in on the normal cadence."""
+
     type: Literal["CHECKIN_OK"] = "CHECKIN_OK"
 
 

@@ -266,7 +266,7 @@ class Engine:
             await log_event(session, instance.id, "inbound_ignored", {"text": text, "reason": "completed"}, now=now)
             return []
         inbound = await log_event(session, instance.id, "inbound_received", {"text": text, "channel": channel}, now=now)
-        signals = self.brain.extract_signals(text, self._brain_context(instance))
+        signals = await self.brain.extract_signals(text, self._brain_context(instance))
         if not signals:
             signals = [NeedsHuman(reason="unrecognized_reply", suggested_options=["read transcript"], evidence=text)]
         await log_event(

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.clock import parse_duration
+from app.clock import coerce_duration, parse_duration
 from app.db.models import Contact
 from app.field_registry import FieldRegistry
 from app.retry import resolve_retry_delay
@@ -22,6 +22,31 @@ def test_parse_duration():
     assert parse_duration("30m") == timedelta(minutes=30)
     with pytest.raises(ValueError):
         parse_duration("soon")
+
+
+def test_coerce_duration_normalises_sloppy_brain_output():
+    """A real Gemini reply once contained "14dPool filter set / schedule follow up in
+    2 weeks". The scheduler must never see that, so Reschedule normalises or rejects."""
+    assert coerce_duration("14d") == "14d"
+    assert coerce_duration(" 3 W ") == "3w"
+    assert coerce_duration("wait 5d please") == "5d"
+    assert coerce_duration("two weeks") == "2w"
+    assert coerce_duration("a couple of days") == "2d"
+    assert coerce_duration("1 month") == "30d"
+    assert coerce_duration("14dPool filter set / schedule follow up in 2 weeks") in {"14d", "2w"}
+    assert coerce_duration("whenever") is None
+    assert coerce_duration("") is None
+
+
+def test_reschedule_signal_rejects_unschedulable_durations():
+    from pydantic import ValidationError
+
+    from app.signals import Reschedule
+
+    assert Reschedule(wait_duration="two weeks").wait_duration == "2w"
+    assert parse_duration(Reschedule(wait_duration="14d garbage text").wait_duration) == timedelta(days=14)
+    with pytest.raises(ValidationError):
+        Reschedule(wait_duration="sometime soon")
 
 
 def test_retry_policy_resolution():

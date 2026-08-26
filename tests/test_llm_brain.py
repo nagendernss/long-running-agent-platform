@@ -1,0 +1,207 @@
+"""Agent Brain tests.
+
+Offline by default: a stub transport stands in for the Gemini endpoint, so schema
+construction, parsing, guard-rails and fallback are all covered without network.
+The live test runs only when GEMINI_API_KEY is set (`pytest -m live`).
+"""
+from __future__ import annotations
+
+import json
+import os
+
+import httpx
+import pytest
+
+from app.agent_brain import RuleBasedAgentBrain
+from app.field_registry import FieldRegistry
+from app.llm_brain import GeminiAgentBrain, build_response_schema, parse_signals
+from app.workflows.client_checkin import CheckinOk, ClientFlag
+from app.workflows.medical_records import AuthRequired, RecordsReceived, RequestDenied
+from app.workflows.registry import default_registry
+
+TARGET = "11111111-1111-1111-1111-111111111111"
+CTX = {"workflow_type": "medical_records_followup", "state": "awaiting_reply", "context": {}, "target_contact_id": TARGET}
+REGISTRY = default_registry()
+FIELDS = FieldRegistry.from_dict({"contact": {"phone": {"auto_apply_threshold": 0.85}, "email": {"auto_apply_threshold": 0.85}}})
+
+
+def stub_brain(responder, **kw) -> GeminiAgentBrain:
+    """A GeminiAgentBrain whose HTTP calls are served by `responder(request) -> Response`."""
+    client = httpx.AsyncClient(transport=httpx.MockTransport(responder))
+    return GeminiAgentBrain(
+        "test-key",
+        domain_signals_for=lambda wt: REGISTRY.get(wt).domain_signals if wt in REGISTRY.types() else [],
+        field_registry=FIELDS,
+        fallback=RuleBasedAgentBrain(domain_rules_for=lambda wt: REGISTRY.get(wt).keyword_rules),
+        client=client,
+        **kw,
+    )
+
+
+def gemini_reply(signals: list[dict]) -> httpx.Response:
+    body = {"candidates": [{"content": {"parts": [{"text": json.dumps({"signals": signals})}]}}]}
+    return httpx.Response(200, json=body)
+
+
+# ---------------------------------------------------------------- schema
+def test_schema_is_generated_from_the_workflow_not_hardcoded():
+    medical = build_response_schema([*(), RecordsReceived, AuthRequired, RequestDenied])
+    types = medical["properties"]["signals"]["items"]["properties"]["type"]["enum"]
+    assert types == ["RECORDS_RECEIVED", "AUTH_REQUIRED", "REQUEST_DENIED"]
+
+    brain = stub_brain(lambda r: gemini_reply([]))
+    generic = ["RESCHEDULE", "NO_ANSWER", "ENTITY_UPDATE", "NEEDS_HUMAN"]
+    assert [c.model_fields["type"].default for c in brain.signal_classes("medical_records_followup")] == generic + [
+        "RECORDS_RECEIVED", "AUTH_REQUIRED", "REQUEST_DENIED",
+    ]
+    assert [c.model_fields["type"].default for c in brain.signal_classes("client_checkin")] == generic + [
+        "CLIENT_FLAG", "CHECKIN_OK",
+    ]
+    # union of every signal's own fields, correctly typed
+    props = build_response_schema(brain.signal_classes("medical_records_followup"))["properties"]["signals"]["items"]["properties"]
+    assert props["wait_duration"] == {"type": "string"}
+    assert props["confidence"] == {"type": "number"}
+    assert props["suggested_options"] == {"type": "array", "items": {"type": "string"}}
+
+
+def test_prompt_carries_workflow_state_and_writable_fields():
+    brain = stub_brain(lambda r: gemini_reply([]))
+    prompt = brain._prompt(CTX, brain.signal_classes("medical_records_followup"))
+    assert "medical_records_followup" in prompt and "awaiting_reply" in prompt and TARGET in prompt
+    assert "email, phone" in prompt  # from the field registry, not a literal in the prompt template
+    assert "HIPAA" in prompt  # domain signal docstrings reach the model
+
+
+# ---------------------------------------------------------------- parsing / guard rails
+def test_parse_forces_entity_update_onto_the_target_contact():
+    signals = parse_signals(
+        {"signals": [{"type": "ENTITY_UPDATE", "confidence": 0.9, "evidence": "call 555-0199",
+                      "entity_type": "case_record", "entity_id": "99999999-9999-9999-9999-999999999999",
+                      "field": "phone", "new_value": "(555) 019-9000"}]},
+        [__import__("app.signals", fromlist=["EntityUpdate"]).EntityUpdate], CTX,
+    )
+    assert len(signals) == 1
+    s = signals[0]
+    assert s.entity_type == "contact" and s.entity_id == TARGET  # model cannot redirect the write
+    assert s.new_value == "5550199000"  # normalised the same way the rule brain does
+
+
+def test_parse_drops_unknown_and_invalid_signals():
+    from app.signals import EntityUpdate, NoAnswer
+
+    out = parse_signals(
+        {"signals": [
+            {"type": "MADE_UP", "confidence": 1.0},                       # unknown type
+            {"type": "ENTITY_UPDATE", "confidence": 0.9},                 # missing required fields
+            {"type": "NO_ANSWER", "confidence": 0.9, "evidence": "vm"},   # good
+            "not-an-object",
+        ]},
+        [EntityUpdate, NoAnswer], CTX,
+    )
+    assert [s.type for s in out] == ["NO_ANSWER"]
+
+
+# ---------------------------------------------------------------- end to end (stubbed)
+async def test_gemini_signals_are_used_when_the_call_succeeds():
+    brain = stub_brain(lambda r: gemini_reply([
+        {"type": "ENTITY_UPDATE", "confidence": 0.92, "evidence": "new number is 555-0199",
+         "field": "phone", "new_value": "555-0199"},
+        {"type": "RESCHEDULE", "confidence": 0.88, "evidence": "not until after the holidays", "wait_duration": "3w"},
+    ]))
+    signals = await brain.extract_signals("our new number is 555-0199, and nothing until after the holidays", CTX)
+    assert brain.last_source == "gemini"
+    assert [s.type for s in signals] == ["ENTITY_UPDATE", "RESCHEDULE"]
+    assert signals[0].entity_id == TARGET and signals[1].wait_duration == "3w"
+
+
+async def test_request_shape_is_what_the_api_expects():
+    seen: dict = {}
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["key"] = request.headers.get("x-goog-api-key")
+        seen["body"] = json.loads(request.content)
+        return gemini_reply([{"type": "NO_ANSWER", "confidence": 1.0, "evidence": "vm"}])
+
+    brain = stub_brain(responder, model="gemini-3.6-flash")
+    await brain.extract_signals("voicemail", CTX)
+    assert seen["url"].endswith("/models/gemini-3.6-flash:generateContent")
+    assert seen["key"] == "test-key"
+    cfg = seen["body"]["generationConfig"]
+    assert cfg["responseMimeType"] == "application/json" and cfg["temperature"] == 0
+    assert cfg["responseSchema"]["properties"]["signals"]["items"]["properties"]["type"]["enum"]
+
+
+@pytest.mark.parametrize(
+    "responder",
+    [
+        lambda r: httpx.Response(500, text="boom"),
+        lambda r: httpx.Response(429, json={"error": "rate limited"}),
+        lambda r: httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "not json"}]}}]}),
+        lambda r: gemini_reply([]),  # valid call, nothing extracted
+    ],
+    ids=["http_500", "rate_limited", "bad_json", "empty_result"],
+)
+async def test_falls_back_to_rules_instead_of_losing_the_message(responder):
+    brain = stub_brain(responder)
+    signals = await brain.extract_signals("no answer, went to voicemail", CTX)
+    assert brain.last_source == "fallback"
+    assert [s.type for s in signals] == ["NO_ANSWER"]
+
+
+async def test_transport_error_falls_back():
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("dns", request=request)
+
+    brain = stub_brain(boom)
+    assert [s.type for s in await brain.extract_signals("records are attached", CTX)] == ["RECORDS_RECEIVED"]
+    assert brain.last_source == "fallback"
+
+
+async def test_empty_transcript_never_calls_the_api():
+    def explode(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("should not have called the API for an empty transcript")
+
+    brain = stub_brain(explode)
+    assert [s.type for s in await brain.extract_signals("   ", CTX)] == ["NO_ANSWER"]
+
+
+async def test_engine_runs_with_the_llm_brain(rt, seed):
+    """The Engine is brain-agnostic: swapping the implementation changes nothing."""
+    from tests.helpers import load, medical_context
+
+    rt.engine.brain = stub_brain(lambda r: gemini_reply([
+        {"type": "RESCHEDULE", "confidence": 0.9, "evidence": "two weeks", "wait_duration": "14d"},
+    ]))
+    async with rt.session_factory() as s, s.begin():
+        inst = await rt.engine.start_instance(s, "medical_records_followup", case_id=seed.case_id, context=medical_context(seed))
+        iid = inst.id
+    async with rt.session_factory() as s, s.begin():
+        await rt.engine.handle_inbound(s, iid, "nothing for about two weeks")
+    inst = await load(rt, iid)
+    assert inst.wake_reason == "dynamic_reschedule" and inst.next_wake_at is not None
+
+
+# ---------------------------------------------------------------- live (opt in)
+@pytest.mark.live
+@pytest.mark.skipif(not os.environ.get("GEMINI_API_KEY"), reason="GEMINI_API_KEY not set")
+async def test_live_gemini_extracts_signals():
+    brain = GeminiAgentBrain(
+        os.environ["GEMINI_API_KEY"],
+        model=os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"),
+        domain_signals_for=lambda wt: REGISTRY.get(wt).domain_signals,
+        field_registry=FIELDS,
+    )
+    signals = await brain.extract_signals(
+        "Hi, this is Mercy Records. You've got the old number - use 555-0199. "
+        "Also we can't pull that chart for about two weeks.", CTX,
+    )
+    assert brain.last_source == "gemini"
+    by_type = {s.type: s for s in signals}
+    assert "ENTITY_UPDATE" in by_type and by_type["ENTITY_UPDATE"].field == "phone"
+    assert "5550199" in by_type["ENTITY_UPDATE"].new_value
+    assert "RESCHEDULE" in by_type and by_type["RESCHEDULE"].wait_duration in {"14d", "2w"}
+
+    checkin_ctx = {**CTX, "workflow_type": "client_checkin"}
+    flagged = await brain.extract_signals("honestly the pain has been getting worse and I barely sleep", checkin_ctx)
+    assert any(s.type in {"CLIENT_FLAG", "NEEDS_HUMAN"} for s in flagged)

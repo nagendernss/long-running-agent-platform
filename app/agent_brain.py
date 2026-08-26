@@ -1,8 +1,8 @@
 """Agent Brain: raw message/transcript -> structured Signals.
 
-`RuleBasedAgentBrain` is a keyword-matching stub. Swapping in an LLM means writing
-one new class that satisfies `AgentBrain` (it would build its tool schema from the
-workflow's `domain_signals` instead of `keyword_rules`). Nothing downstream changes.
+`RuleBasedAgentBrain` is a keyword-matching baseline; `app/llm_brain.py` holds the
+LLM-backed implementation. Both satisfy `AgentBrain`, so swapping is a config flag -
+nothing downstream changes. The interface is async because a real brain does I/O.
 
 workflow_context passed by the Engine:
     {"workflow_type", "instance_id", "state", "context", "target_contact_id"}
@@ -13,11 +13,12 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
+from app.clock import duration_from_words
 from app.signals import EntityUpdate, NeedsHuman, NoAnswer, Reschedule, Signal
 
 
 class AgentBrain(Protocol):
-    def extract_signals(self, message_text: str, workflow_context: dict[str, Any]) -> list[Signal]: ...
+    async def extract_signals(self, message_text: str, workflow_context: dict[str, Any]) -> list[Signal]: ...
 
 
 @dataclass(frozen=True)
@@ -32,21 +33,8 @@ def rule(name: str, pattern: str, build: Callable[..., Signal | None]) -> Keywor
 
 
 # --- helpers -----------------------------------------------------------------------
-_WORD_NUMBERS = {
-    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "couple": 2, "few": 3,
-}
-_UNIT_TO_SUFFIX = {"minute": "m", "hour": "h", "day": "d", "week": "w"}
 PHONE_RE = re.compile(r"(?<!\d)(\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\d{3}[\s.-]\d{4})(?!\d)")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-
-
-def duration_from_words(amount: str, unit: str) -> str:
-    n = int(amount) if amount.isdigit() else _WORD_NUMBERS.get(amount.lower(), 1)
-    unit = unit.lower().rstrip("s")
-    if unit == "month":
-        return f"{n * 30}d"
-    return f"{n}{_UNIT_TO_SUFFIX[unit]}"
 
 
 def normalize_phone(raw: str) -> str:
@@ -135,7 +123,7 @@ class RuleBasedAgentBrain:
     def __init__(self, domain_rules_for: Callable[[str], list[KeywordRule]] | None = None):
         self._domain_rules_for = domain_rules_for or (lambda _wt: [])
 
-    def extract_signals(self, message_text: str, workflow_context: dict[str, Any]) -> list[Signal]:
+    async def extract_signals(self, message_text: str, workflow_context: dict[str, Any]) -> list[Signal]:
         text = (message_text or "").strip()
         if not text:
             return [NoAnswer(confidence=1.0, evidence="<empty transcript>")]

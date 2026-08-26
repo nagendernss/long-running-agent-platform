@@ -18,7 +18,7 @@ defined inside a test to prove that adding one touches no engine code.
 inbound message / call transcript
         |
         v
-1. Agent Brain          app/agent_brain.py       text -> [Signal]      (rule-based stub, swappable)
+1. Agent Brain          app/llm_brain.py         text -> [Signal]      (Gemini; rule baseline behind it)
         |
         v
 2. Engine               app/engine.py            workflow-AGNOSTIC orchestrator
@@ -39,6 +39,7 @@ Supporting pieces the Engine owns, all generic:
 | Versioned fact write-back | `app/write_back.py`, `app/db/facts.py` | gated by `config/field_registry.yaml` |
 | Human-in-the-loop | `app/review.py` | `review_task` + resolve path |
 | Channels | `app/channels/` | `MockChannel`; real telephony/email plugs in here |
+| Agent Brain | `app/agent_brain.py`, `app/llm_brain.py` | keyword baseline + Gemini, chosen by config |
 | Audit trail | `app/events.py` | append-only `event` table, monotonic `seq` |
 
 `tests/test_extensibility.py` enforces the invariant twice: it runs a brand-new
@@ -53,28 +54,63 @@ workflow through the unmodified engine, and it greps `app/engine.py` and
 python -m venv .venv && .venv/Scripts/pip install -e ".[dev]"    # Windows
 # python -m venv .venv && .venv/bin/pip install -e ".[dev]"      # macOS/Linux
 
-cp .env.example .env          # DATABASE_URL
-docker compose up -d          # Postgres 16   (or skip: the demo/tests embed one)
+cp .env.example .env          # DATABASE_URL, and GEMINI_API_KEY for the LLM brain
+docker compose up -d          # Postgres 16   (or skip: --embedded starts a bundled one)
 ```
+
+### Agent Brain
+
+Two interchangeable implementations behind one `AgentBrain` protocol:
+
+| `AGENT_BRAIN` | Implementation | Notes |
+|---|---|---|
+| `rules` | `RuleBasedAgentBrain` | keyword matching, no network, deterministic — what the test suite runs on |
+| `gemini` | `GeminiAgentBrain` | Google Gemini structured output, `gemini-3.6-flash` by default |
+
+Setting `GEMINI_API_KEY` alone switches to the LLM; `AGENT_BRAIN=rules` forces the
+baseline back on. `scripts/demo.py --brain gemini|rules` overrides per run.
+
+The LLM brain is not a hardcoded prompt. Its JSON schema is generated from the
+generic signal classes plus the workflow's own `domain_signals`, the writable-field
+list comes from the Field Registry, and each signal's description comes from its
+docstring — so a new workflow reshapes the prompt without anyone editing a prompt.
+
+Three guard rails, because a model is not a trusted input:
+
+- **It cannot redirect a write.** `ENTITY_UPDATE.entity_id` is overwritten with the
+  contact the instance is actually talking to, and `entity_type` is forced to
+  `contact`. The model chooses *what changed*, never *whose record changes*.
+- **It cannot emit an unschedulable delay.** `Reschedule.wait_duration` is normalised
+  by a validator on the signal model itself (`"two weeks"` → `2w`, `"14d …notes"` →
+  `14d`, `"sometime soon"` → rejected). A live run really did return
+  `"14dPool filter set / schedule follow up in 2 weeks"`; the scheduler never saw it.
+- **It cannot lose a message.** Any HTTP error, timeout, malformed JSON or empty
+  extraction falls back to the rule brain; if that finds nothing either, the Engine
+  raises `NEEDS_HUMAN`. A 429 during a live demo run was absorbed this way and the
+  run still passed every assertion.
 
 **The demo is the working slice** — 12 steps, virtual clock, every step asserted:
 
 ```bash
-python scripts/demo.py                       # embedded Postgres, nothing to install
+python scripts/demo.py                        # embedded Postgres, brain from .env
+python scripts/demo.py --brain gemini         # force the LLM brain
+python scripts/demo.py --brain rules          # force the offline baseline
 python scripts/demo.py --db postgresql://...  # against your own Postgres
 ```
 
 Tests (spin up an embedded Postgres, run a real Procrastinate worker):
 
 ```bash
-python -m pytest -q          # 28 passed
+python -m pytest -q                  # 44 passed - fully offline (stubbed HTTP, embedded Postgres)
+python -m pytest -m live -o addopts=""   # 1 more: hits the real Gemini API, needs GEMINI_API_KEY
 ```
 
 API + dashboard, and the durable worker:
 
 ```bash
-python scripts/serve.py      # http://127.0.0.1:8000   (uvicorn app.api.main:app also works off-Windows)
-python scripts/worker.py     # executes scheduled wake-ups
+python scripts/serve.py --embedded --seed   # bundled Postgres + demo data, http://127.0.0.1:8000
+python scripts/serve.py                     # against DATABASE_URL from .env
+python scripts/worker.py                    # executes scheduled wake-ups
 ```
 
 ---
@@ -128,9 +164,13 @@ same code path handles auto-apply, human confirmation, and refusal.
 clock), which made the audit order nondeterministic. `seq` makes the timeline exact.
 
 **The brain never imports a workflow.** `RuleBasedAgentBrain` takes a
-`domain_rules_for(workflow_type)` callable; the registry supplies each workflow's own
-`keyword_rules`. An LLM implementation would instead build a tool schema from each
-workflow's `domain_signals` — same seam, one new file.
+`domain_rules_for(workflow_type)` callable and `GeminiAgentBrain` takes
+`domain_signals_for(workflow_type)`; the registry supplies both. Neither brain has a
+single workflow name in it.
+
+**The brain interface is async.** `extract_signals` returns an awaitable because a
+real brain does I/O. That was the only downstream change needed when the LLM landed —
+one `await` in `Engine.handle_inbound`.
 
 ---
 
@@ -189,7 +229,6 @@ touch the DB, scheduler or channels directly.
 - **Full human-in-the-loop.** `review_task` rows, creation, listing and a minimal
   resolve path exist. Routing rules, assignment, SLAs and escalation ladders are
   **not** built — they belong in `app/review.py` and would not touch the Engine.
-- **Real LLM brain.** Keyword stub only. See "the brain never imports a workflow".
 - **Real channels.** `MockChannel` only. `app/channels/base.py` is the seam;
   inbound webhooks would call `Engine.handle_inbound`.
 - **Compliance / calling-hours enforcement.** `apply_compliance_window()` in
@@ -200,9 +239,16 @@ touch the DB, scheduler or channels directly.
 
 ## Known limitations
 
-- The rule-based brain is keyword matching: it will mis-read anything phrased
+- The rule-based fallback is keyword matching: it will mis-read anything phrased
   unusually. Unmatched replies deliberately fall through to `NEEDS_HUMAN` rather
   than being silently dropped.
+- The LLM brain calls Gemini once per inbound message, synchronously inside the
+  inbound transaction. Fine at this volume; at scale it belongs in its own job so a
+  slow provider cannot hold a database transaction open.
+- No prompt-injection hardening. A hostile inbound message is passed to the model as
+  data, and the guard rails above bound the damage (no arbitrary entity writes, no
+  arbitrary delays), but a crafted message could still steer which signal is emitted.
+  Confidence thresholds and the review queue are the current mitigation.
 - Phone numbers are stored as extracted (`5550199`), not E.164-normalised.
 - `Engine.run_due` processes due instances sequentially in one transaction; fine as
   a sweep, but the Procrastinate worker is the concurrent path.

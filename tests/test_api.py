@@ -89,6 +89,35 @@ async def test_filters_and_dashboard_pages(client, rt, seed):
     assert page.status_code == 200 and "Timeline" in page.text
 
 
+async def test_dashboard_resolve_form_posts(client, rt, seed):
+    """The dashboard's resolve buttons post a urlencoded form, not JSON - that path
+    needs python-multipart installed, so it gets its own test."""
+    r = await client.post(
+        "/api/instances",
+        json={"workflow_type": "medical_records_followup", "case_id": str(seed.case_id), "context": medical_context(seed)},
+    )
+    iid = r.json()["id"]
+    for _ in range(4):
+        await client.post("/api/simulate/inbound", json={"instance_id": iid, "text": "no answer"})
+    task = next(t for t in (await client.get("/api/review-queue")).json() if t["instance_id"] == iid)
+
+    r = await client.post(f"/review-queue/{task['id']}/resolve", data={"action": "retry"})
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    inst = (await client.get(f"/api/instances/{iid}")).json()
+    assert inst["status"] == "active" and inst["attempt_count"] == 0 and inst["wake_reason"] == "resume_after_review"
+    assert not [t for t in (await client.get("/api/review-queue")).json() if t["instance_id"] == iid]
+
+    # and the 'close' action completes the instance
+    for _ in range(4):
+        await client.post("/api/simulate/inbound", json={"instance_id": iid, "text": "no answer"})
+    task = next(t for t in (await client.get("/api/review-queue")).json() if t["instance_id"] == iid)
+    r = await client.post(
+        f"/review-queue/{task['id']}/resolve", data={"action": "close"}, headers={"referer": f"/instances/{iid}"}
+    )
+    assert r.status_code == 303 and r.headers["location"] == f"/instances/{iid}"
+    assert (await client.get(f"/api/instances/{iid}")).json()["status"] == "completed"
+
+
 async def test_error_paths(client, seed):
     assert (await client.post("/api/instances", json={"workflow_type": "nope", "context": {}})).status_code == 400
     assert (await client.get(f"/api/instances/{seed.case_id}")).status_code == 404

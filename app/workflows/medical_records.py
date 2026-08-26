@@ -21,14 +21,22 @@ from app.workflows.base import BaseWorkflow, WorkflowContext
 
 # --- domain signals (only this workflow ever sees these) ---------------------------
 class RecordsReceived(Signal):
+    """The provider says the records have been sent, faxed, mailed, uploaded or attached."""
+
     type: Literal["RECORDS_RECEIVED"] = "RECORDS_RECEIVED"
 
 
 class AuthRequired(Signal):
+    """The provider will not release records until the client signs an authorization
+    or release form (HIPAA, patient consent). The client has to act."""
+
     type: Literal["AUTH_REQUIRED"] = "AUTH_REQUIRED"
 
 
 class RequestDenied(Signal):
+    """The provider refuses outright, or says no such patient exists. Not the same as
+    a delay - use RESCHEDULE for 'not ready yet'."""
+
     type: Literal["REQUEST_DENIED"] = "REQUEST_DENIED"
     reason: Optional[str] = None
 

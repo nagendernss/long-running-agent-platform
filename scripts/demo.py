@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 import uuid
 from datetime import timedelta
@@ -24,7 +25,7 @@ from sqlalchemy import select, text  # noqa: E402
 
 from app.channels import MockChannel  # noqa: E402
 from app.clock import FakeClock  # noqa: E402
-from app.config import Settings  # noqa: E402
+from app.config import get_settings  # noqa: E402
 from app.db.facts import get_current_value, get_entity_field  # noqa: E402
 from app.db.models import CaseRecord, Contact, EntityFactVersion, ReviewTask, WorkflowInstance  # noqa: E402
 from app.events import list_events  # noqa: E402
@@ -109,9 +110,13 @@ async def main(db_url: str | None) -> None:
         db_url = srv.get_uri("hc_demo")
         say(f"{DIM}embedded postgres: {db_url}{RESET}")
 
-    settings = Settings(database_url=db_url, field_registry_path=str(ROOT / "config" / "field_registry.yaml"))
+    os.environ.setdefault("FIELD_REGISTRY_PATH", str(ROOT / "config" / "field_registry.yaml"))
+    settings = get_settings(db_url)  # picks up AGENT_BRAIN / GEMINI_API_KEY from .env
     await ensure_schema(settings)
     rt = await build_runtime(settings, clock=FakeClock(), channel=MockChannel(), durable=True)
+    say(f"{DIM}agent brain: {settings.agent_brain}"
+        + (f" ({settings.gemini_model})" if settings.agent_brain == "gemini" else " (keyword baseline)")
+        + RESET)
     async with rt.db_engine.begin() as conn:
         await conn.execute(text("TRUNCATE review_task, entity_fact_version, event, workflow_instance, case_record, contact, procrastinate_jobs CASCADE"))
 
@@ -268,6 +273,9 @@ async def main(db_url: str | None) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", dest="db", default=None, help="Postgres URL (default: embedded pgserver)")
+    ap.add_argument("--brain", choices=["rules", "gemini"], default=None, help="override AGENT_BRAIN for this run")
     args = ap.parse_args()
+    if args.brain:
+        os.environ["AGENT_BRAIN"] = args.brain
     configure_event_loop()  # must run BEFORE the loop exists (psycopg needs the selector loop on Windows)
     asyncio.run(main(args.db))
