@@ -349,12 +349,26 @@ already installed on the machine.
 python scripts/serve.py --embedded --fresh --voice   # then open /phone in a second window
 ```
 
+**One prerequisite: `ffmpeg` on PATH.** Browsers record WebM/Opus and whisper wants
+PCM, so every utterance is converted before transcription. Without it each turn
+decodes to nothing and the agent politely says it cannot hear you.
+
+| | |
+|---|---|
+| macOS | `brew install ffmpeg` |
+| Debian/Ubuntu | `sudo apt install ffmpeg` |
+| Windows | `winget install Gyan.FFmpeg` (or scoop/choco) |
+
+The `small.en` whisper model downloads on the first call and is cached after that.
+Answer the phone in Chrome or Edge; open it on `localhost` rather than a LAN address,
+because browsers only hand out the microphone on a secure origin.
+
 Everything except the language model runs locally:
 
 | Piece | What | Measured here |
 |---|---|---|
 | Speech to text | `faster-whisper` `small.en` | loads in 15.6s once; ~1.8s per utterance |
-| Speech out | the browser's `speechSynthesis` (Windows voices) | no model, no server audio path |
+| Speech out | the browser's `speechSynthesis` (whatever voices the OS has) | no model, no server audio path |
 | The conversation | Gemini, keys rotating on quota | 1-3s per turn |
 | If Gemini is gone | Ollama `llama3.2:3b` | 0.4s per turn warm |
 
