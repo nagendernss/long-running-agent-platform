@@ -198,3 +198,16 @@ def test_the_goal_does_not_prompt_asking_about_a_fee():
     goal = build_goal(Definition())
     assert "Do not raise money yourself" in goal
     assert "a fee, a form, a portal" not in goal, "that phrasing invited the question"
+
+
+def test_the_agent_is_told_it_can_follow_up_elsewhere():
+    """A live call went four turns of "I am an automated assistant and cannot place
+    calls" after the other party offered a different number - refusing the one thing
+    the platform actually does, and never ending."""
+    from app.voice.agent import SYSTEM
+
+    system = SYSTEM.format(goal=GOAL, opening=OPENING)
+    assert "Never say you cannot call" in system
+    assert "read it back to confirm it" in system
+    assert "they have given you somewhere else to try" in system, "and that ends the call"
+    assert "never explain your own limitations twice" in system
