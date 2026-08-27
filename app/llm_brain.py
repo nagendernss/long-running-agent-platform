@@ -24,18 +24,17 @@ from typing import Any, Callable, Iterable, Sequence
 import httpx
 from pydantic import ValidationError
 
+from app import gemini as gemini_module
+from app.gemini import GeminiClient
+
 from app.agent_brain import AgentBrain, RuleBasedAgentBrain, normalize_phone
 from app.field_registry import FieldRegistry
 from app.signals import ActionRequired, EntityUpdate, NeedsHuman, NoAnswer, Reschedule, Signal
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemini-3.6-flash"
-API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
-RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
-# A different key can fix these; retrying the same one cannot.
-ROTATE_STATUSES = frozenset({401, 403, 429})
-RETRY_DELAYS = (1.0, 4.0)  # short: this runs inside the inbound path
+DEFAULT_MODEL = gemini_module.DEFAULT_MODEL
+RETRY_DELAYS = gemini_module.RETRY_DELAYS
 
 GENERIC_SIGNAL_CLASSES: tuple[type[Signal], ...] = (Reschedule, NoAnswer, EntityUpdate, ActionRequired, NeedsHuman)
 
@@ -202,30 +201,28 @@ class GeminiAgentBrain:
         client: httpx.AsyncClient | None = None,
         retry_delays: Sequence[float] = RETRY_DELAYS,
     ):
-        self.api_keys: tuple[str, ...] = (api_key,) if isinstance(api_key, str) else tuple(api_key)
-        if not self.api_keys:
-            raise ValueError("GeminiAgentBrain needs at least one API key")
-        self._key_index = 0        # sticky: stay on whichever key last worked
+        self.gemini = GeminiClient(api_key, model=model, timeout=timeout,
+                                   retry_delays=retry_delays, client=client)
         self.model = model
         self._domain_signals_for = domain_signals_for or (lambda _wt: [])
         self._prompt_notes_for = prompt_notes_for or (lambda _wt: None)
         self._writable_fields = sorted(field_registry.field_names()) if field_registry else ["phone", "email"]
         self.fallback = fallback or RuleBasedAgentBrain()
-        self.timeout = timeout
-        self._client = client
-        self._retry_delays = tuple(retry_delays)
         self.last_source: str | None = None  # "gemini" | "fallback" - handy in logs/tests
+
+    # the keys live on the shared client; these keep the brain's own surface familiar
+    @property
+    def api_keys(self) -> tuple[str, ...]:
+        return self.gemini.api_keys
+
+    @api_keys.setter
+    def api_keys(self, keys) -> None:
+        self.gemini.api_keys = tuple(keys)
+        self.gemini._key_index = 0
 
     @property
     def api_key(self) -> str:
-        return self.api_keys[self._key_index]
-
-    def _rotate_key(self) -> bool:
-        """Move to the next key. Returns False once every key has been tried."""
-        if len(self.api_keys) < 2:
-            return False
-        self._key_index = (self._key_index + 1) % len(self.api_keys)
-        return True
+        return self.gemini.api_key
 
     def signal_classes(self, workflow_type: str) -> list[type[Signal]]:
         return [*GENERIC_SIGNAL_CLASSES, *self._domain_signals_for(workflow_type)]
@@ -252,56 +249,9 @@ class GeminiAgentBrain:
         )
 
     async def _call_with_retry(self, prompt: str, message_text: str, schema: dict[str, Any]) -> dict[str, Any]:
-        """Rate limits and 5xx are transient; falling straight back to keyword matching
-        on a 429 would quietly downgrade extraction quality. Retry a couple of times
-        (honouring Retry-After when the provider sends one), then give up to the
-        fallback rather than hold the inbound transaction open any longer."""
-        last: Exception | None = None
-        keys_tried = 1
-        for attempt in range(len(self._retry_delays) + 1):
-            try:
-                return await self._call(prompt, message_text, schema)
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code
-                # Out of quota or a rejected key: another key fixes it, waiting does not.
-                if status in ROTATE_STATUSES and keys_tried < len(self.api_keys) and self._rotate_key():
-                    keys_tried += 1
-                    log.warning("gemini key %s returned %s, trying the next key", self._key_index, status)
-                    continue
-                if status not in RETRY_STATUSES or attempt == len(self._retry_delays):
-                    raise
-                last = exc
-                delay = self._retry_delays[attempt]
-                retry_after = exc.response.headers.get("retry-after")
-                if retry_after and retry_after.isdigit():
-                    delay = min(float(retry_after), 10.0)
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
-                if attempt == len(self._retry_delays):
-                    raise
-                last = exc
-                delay = self._retry_delays[attempt]
-            log.info("gemini call failed (%s), retrying in %.1fs", type(last).__name__, delay)
-            await asyncio.sleep(delay)
-        raise last  # unreachable, keeps type checkers happy
-
-    async def _call(self, prompt: str, message_text: str, schema: dict[str, Any]) -> dict[str, Any]:
-        body = {
-            "systemInstruction": {"parts": [{"text": prompt}]},
-            "contents": [{"role": "user", "parts": [{"text": f"Inbound message:\n{message_text}"}]}],
-            "generationConfig": {"responseMimeType": "application/json", "responseSchema": schema, "temperature": 0},
-        }
-        headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
-        url = f"{API_ROOT}/{self.model}:generateContent"
-        if self._client is not None:
-            response = await self._client.post(url, json=body, headers=headers, timeout=self.timeout)
-        else:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(url, json=body, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        parts = data["candidates"][0]["content"]["parts"]
-        text = next(p["text"] for p in reversed(parts) if "text" in p)
-        return json.loads(text)
+        return await self.gemini.generate_json(
+            system=prompt, user="Inbound message:\n" + message_text, schema=schema
+        )
 
     async def extract_signals(self, message_text: str, workflow_context: dict[str, Any]) -> list[Signal]:
         text = (message_text or "").strip()
