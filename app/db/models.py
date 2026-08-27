@@ -109,6 +109,25 @@ class WorkflowTypeRow(Base):
     updated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
 
 
+class CallRow(Base):
+    """One placed call. The transcript grows a turn at a time so a dropped socket
+    still leaves behind everything that was actually said."""
+
+    __tablename__ = "call"
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    instance_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("workflow_instance.id"))
+    contact_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("contact.id"))
+    status: Mapped[str] = mapped_column(Text, default="ringing")
+    goal: Mapped[str | None] = mapped_column(Text)
+    opening: Mapped[str | None] = mapped_column(Text)
+    channel: Mapped[str] = mapped_column(Text, default="call")
+    to_address: Mapped[str | None] = mapped_column(Text)
+    transcript: Mapped[list[Any]] = mapped_column(JSONB, default=list)
+    created_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    answered_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+
 # entity_type -> model, for base-column fallback in the fact resolver
 ENTITY_MODELS: dict[str, type[Base]] = {
     "contact": Contact,

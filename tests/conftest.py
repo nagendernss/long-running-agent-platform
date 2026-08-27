@@ -21,7 +21,7 @@ configure_event_loop()
 
 ROOT = Path(__file__).resolve().parents[1]
 TABLES = [
-    "review_task", "entity_fact_version", "event", "workflow_instance", "case_record", "contact",
+    "call", "review_task", "entity_fact_version", "event", "workflow_instance", "case_record", "contact",
     "procrastinate_events", "procrastinate_jobs",
 ]
 # workflow_type is NOT truncated - its seeded rows are the two workflows that used to
