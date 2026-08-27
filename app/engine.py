@@ -635,7 +635,7 @@ class Engine:
         if instance is None:
             raise KeyError(f"instance not found: {instance_id}")
         definition = self.definition_for(instance)
-        allowed = {o["action"] for o in getattr(definition, "resolution_options", []) or []}
+        allowed = {o["action"] for o in definition.outcomes_for(instance)}
         if action not in allowed:
             raise ValueError(
                 f"{instance.workflow_type} has no outcome {action!r}"

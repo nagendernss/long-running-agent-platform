@@ -153,3 +153,40 @@ async def test_unrecognized_reply_escalates_to_human(rt, seed):
     assert [s.type for s in sigs] == ["NEEDS_HUMAN"]
     assert (await load(rt, iid)).status == "blocked"
     assert [t.reason for t in await review_tasks(rt, iid)] == ["unrecognized_reply"]
+
+
+async def test_authorization_signed_is_only_offered_when_one_was_asked_for(rt, seed, client=None):
+    """Reported from the dashboard: a $45 payment task carried a button reading
+    "authorization signed" on a chase where nobody had ever mentioned an authorization.
+    Every review row rendered the workflow's whole list of endings, whatever the row
+    was about. A button that does not apply gets pressed, and then the file says
+    something that did not happen."""
+    from app.workflows.medical_records import MedicalRecordsFollowupWorkflow
+
+    workflow = MedicalRecordsFollowupWorkflow()
+    async with rt.session_factory() as s, s.begin():
+        inst = await rt.engine.start_instance(
+            s, "medical_records_followup", case_id=seed.case_id, context=medical_context(seed)
+        )
+        offered = {o["action"] for o in workflow.outcomes_for(inst)}
+        assert offered == {"records_received"}, "nothing is waiting on a form"
+
+        inst.context = {**inst.context, "auth_required": True}
+        offered = {o["action"] for o in workflow.outcomes_for(inst)}
+        assert offered == {"records_received", "auth_obtained"}
+
+
+async def test_recording_an_outcome_that_does_not_apply_is_refused(rt, seed):
+    """The guard is on the engine too, not only the template - the button is gone, and
+    a hand-rolled POST still cannot record a signature nobody asked for."""
+    import pytest
+
+    async with rt.session_factory() as s, s.begin():
+        inst = await rt.engine.start_instance(
+            s, "medical_records_followup", case_id=seed.case_id, context=medical_context(seed)
+        )
+        iid = inst.id
+
+    async with rt.session_factory() as s, s.begin():
+        with pytest.raises(ValueError, match="auth_obtained"):
+            await rt.engine.record_outcome(s, iid, "auth_obtained", resolved_by="dashboard")

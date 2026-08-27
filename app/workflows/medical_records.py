@@ -144,6 +144,14 @@ class MedicalRecordsFollowupWorkflow(BaseWorkflow):
             await ctx.send(instance, client_id, f"Update: {provider} asked us to follow up on {_fmt(instance.next_wake_at)}. We'll keep you posted.", channel=channel)
 
     # -- staff resolutions ---------------------------------------------------------
+    def outcomes_for(self, instance: WorkflowInstance) -> list[dict[str, str]]:
+        """"Authorization signed" is only an answer to a question that was asked. It
+        clears `auth_required` and resumes the chase, which means nothing on a chase
+        that was never waiting on a form - and reads as an invitation to record
+        something that never happened."""
+        waiting_on_auth = bool(instance.context.get("auth_required"))
+        return [o for o in self.resolution_options if o["action"] != "auth_obtained" or waiting_on_auth]
+
     async def on_review_resolved(self, instance: WorkflowInstance, task: ReviewTask, ctx: WorkflowContext) -> None:
         action = (task.resolution or {}).get("action")
         if action == "records_received":

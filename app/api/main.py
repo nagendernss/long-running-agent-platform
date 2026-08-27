@@ -298,7 +298,8 @@ async def resolution_options(runtime: Runtime, s: AsyncSession, tasks: list[Revi
         inst = await s.get(WorkflowInstance, task.instance_id) if task.instance_id else None
         if inst is None:
             continue
-        options[str(task.id)] = list(getattr(runtime.registry.get(inst.workflow_type), "resolution_options", []))
+        definition = runtime.registry.get(inst.workflow_type)
+        options[str(task.id)] = list(definition.outcomes_for(inst))
     return options
 
 
@@ -679,7 +680,7 @@ async def instance_page(
         {"instance": inst, "events": events, "rounds": build_rounds(events),
          "reviews": reviews, "case": case, "contacts": contacts, "clock": clock_state(runtime),
          "ladders": ladder_sizes(runtime), "options": await resolution_options(runtime, s, reviews),
-         "outcomes": list(getattr(runtime.registry.get(inst.workflow_type), "resolution_options", []) or [])},
+         "outcomes": list(runtime.registry.get(inst.workflow_type).outcomes_for(inst))},
     )
 
 

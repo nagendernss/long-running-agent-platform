@@ -65,6 +65,8 @@ class WorkflowDefinition(Protocol):
     domain_signals: list[type[Signal]]  # for a future LLM brain to build its tool schema
     keyword_rules: list["KeywordRule"]  # for the rule-based brain stub
 
+    def outcomes_for(self, instance: WorkflowInstance) -> list[dict[str, str]]: ...
+
     async def on_start(self, instance: WorkflowInstance, ctx: WorkflowContext) -> None: ...
     async def on_wake(self, instance: WorkflowInstance, ctx: WorkflowContext) -> None: ...
     async def on_enter_state(self, instance: WorkflowInstance, ctx: WorkflowContext) -> None: ...
@@ -98,6 +100,18 @@ class BaseWorkflow:
     resolution_options: ClassVar[list[dict[str, str]]] = []
     domain_signals: ClassVar[list[type[Signal]]] = []
     keyword_rules: ClassVar[list["KeywordRule"]] = []
+
+    def outcomes_for(self, instance: WorkflowInstance) -> list[dict[str, str]]:
+        """Which of the endings above make sense for *this* instance right now.
+
+        Every option was offered on every row, so a payment task carried a button
+        saying "authorization signed" for a chase where nobody had ever mentioned an
+        authorization. A button that does not apply is worse than a missing one: it
+        gets pressed, and then the record says something that did not happen.
+
+        Default is all of them; a workflow narrows it when an ending depends on state.
+        """
+        return list(self.resolution_options)
 
     async def on_start(self, instance: WorkflowInstance, ctx: WorkflowContext) -> None:
         await self.on_wake(instance, ctx)

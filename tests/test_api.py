@@ -345,7 +345,9 @@ async def test_a_reviewer_can_record_the_real_outcome(client, rt, seed):
     iid = r.json()["id"]
     await client.post("/api/simulate/inbound", json={"instance_id": iid, "text": "asdf ???"})  # -> NEEDS_HUMAN
     task = next(t for t in (await client.get("/api/review-queue")).json() if t["instance_id"] == iid)
-    assert {o["action"] for o in task["resolution_options"]} == {"records_received", "auth_obtained"}
+    # Only the endings that apply. Nothing here asked for an authorization, so
+    # "authorization signed" is not on offer - see test_medical_records.py.
+    assert {o["action"] for o in task["resolution_options"]} == {"records_received"}
 
     page = (await client.get("/")).text
     assert "records received" in page
@@ -465,7 +467,7 @@ async def test_records_received_can_be_recorded_without_waiting_to_be_asked(clie
     page = (await client.get(f"/instances/{iid}")).text
     assert "Record what happened" in page
     assert 'value="records_received"' in page and "records received" in page
-    assert 'value="auth_obtained"' in page
+    assert 'value="auth_obtained"' not in page, "nothing here is waiting on a signature"
 
     r = await client.post(f"/instances/{iid}/outcome", data={"action": "records_received"})
     assert r.status_code == 303
