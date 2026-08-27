@@ -16,6 +16,7 @@ dependencies = [
     "python-multipart>=0.0.9",   # dashboard form posts (review-task resolve)
     "python-dotenv>=1.0",
     "httpx>=0.27",              # LLM agent brain (Gemini REST)
+    "faster-whisper>=1.0",      # local speech-to-text for voice calls
 ]
 
 [project.optional-dependencies]
