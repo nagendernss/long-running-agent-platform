@@ -115,9 +115,11 @@ class CallRow(Base):
 
     __tablename__ = "call"
     id: Mapped[uuid.UUID] = _uuid_pk()
+    # insertion order, so a queue is stable even when two calls share a timestamp
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(), server_default=None)
     instance_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("workflow_instance.id"))
     contact_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("contact.id"))
-    status: Mapped[str] = mapped_column(Text, default="ringing")
+    status: Mapped[str] = mapped_column(Text, default="queued")
     goal: Mapped[str | None] = mapped_column(Text)
     opening: Mapped[str | None] = mapped_column(Text)
     channel: Mapped[str] = mapped_column(Text, default="call")

@@ -364,7 +364,9 @@ about confidence so a possibly-misheard value gets confirmed by a person.
 
 **Calls queue.** Several instances can come due in the same tick, but one person
 answers the phone, so calls are offered one at a time, oldest first, and nothing rings
-while a call is live. The ring timeout starts when a call is actually *offered* rather
+while a call is live. A call is `queued` when placed and `ringing` only while it is
+actually being offered - the status says which, rather than one status covering both
+and the difference hiding in a timestamp. The ring timeout starts when a call is actually *offered* rather
 than when it was placed - a call waiting behind a twenty-minute conversation has not
 been ignored, and timing it out for that would turn a busy hour into a pile of false
 no-answers. A call rings for a minute

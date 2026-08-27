@@ -21,6 +21,7 @@ from app.clock import Clock
 from app.events import log_event
 from app.voice.agent import CallAgent, CallTurn
 from app.voice.repository import (
+    WAITING_STATUSES,
     answer_call,
     append_turn,
     finish_call,
@@ -134,8 +135,8 @@ async def miss_call(session_factory, clock: Clock, engine, call_id: uuid.UUID, r
     an unanswered call reaches the existing retry ladder rather than a new code path."""
     async with session_factory() as session, session.begin():
         call = await get_call(session, call_id)
-        if call is None or call.status != "ringing":
-            return
+        if call is None or call.status not in WAITING_STATUSES:
+            return  # already answered, or already finished
         await finish_call(session, call_id, "missed", clock.now())
         instance_id = call.instance_id
         if instance_id:

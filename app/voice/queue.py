@@ -23,6 +23,7 @@ from sqlalchemy import select
 
 from app.clock import Clock
 from app.db.models import CallRow
+from app.voice.repository import WAITING_STATUSES
 from app.voice.session import miss_call
 
 log = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ async def _oldest(session, *statuses: str) -> CallRow | None:
     stmt = (
         select(CallRow)
         .where(CallRow.status.in_(statuses))
-        .order_by(CallRow.created_at.asc())
+        .order_by(CallRow.created_at.asc(), CallRow.seq.asc())
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none()
@@ -52,26 +53,30 @@ async def _oldest(session, *statuses: str) -> CallRow | None:
 async def offer_next(session, clock: Clock) -> QueueState:
     """Which call the phone should be ringing about, if any.
 
-    Stamps `ringing_since` when a call first reaches the front, which is what the
-    timeout counts from. Returns nothing while a call is active: the line is busy.
+    Moving a call from `queued` to `ringing` *is* the act of offering it, and
+    `ringing_since` is what the timeout counts from. Returns nothing while a call is
+    active: the line is busy.
     """
     active = await _oldest(session, "active")
-    ringing = list(
+    waiting = list(
         (await session.execute(
-            select(CallRow).where(CallRow.status == "ringing").order_by(CallRow.created_at.asc())
+            select(CallRow)
+            .where(CallRow.status.in_(WAITING_STATUSES))
+            .order_by(CallRow.created_at.asc(), CallRow.seq.asc())
         )).scalars().all()
     )
     if active is not None:
-        return QueueState(offered=None, waiting=len(ringing), busy=True)
-    if not ringing:
+        return QueueState(offered=None, waiting=len(waiting), busy=True)
+    if not waiting:
         return QueueState(offered=None, waiting=0, busy=False)
 
-    head = ringing[0]
-    if head.ringing_since is None:
+    head = waiting[0]
+    if head.status == "queued":
+        head.status = "ringing"
         head.ringing_since = clock.now()
         await session.flush()
-        log.info("offering call %s (%s waiting behind it)", head.id, len(ringing) - 1)
-    return QueueState(offered=head, waiting=len(ringing) - 1, busy=False)
+        log.info("ringing call %s (%s queued behind it)", head.id, len(waiting) - 1)
+    return QueueState(offered=head, waiting=len(waiting) - 1, busy=False)
 
 
 async def sweep_calls(session_factory, clock: Clock, engine, ring_timeout: timedelta = RING_TIMEOUT) -> dict:

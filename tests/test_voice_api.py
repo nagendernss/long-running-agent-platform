@@ -34,12 +34,19 @@ async def place(rt, seed):
     return iid, str(call.id)
 
 
-async def test_the_phone_page_sees_a_ringing_call(client, rt, seed):
+async def test_the_phone_page_offers_a_placed_call(client, rt, seed):
+    """A placed call is queued; asking the phone what to do is what makes it ring."""
     _iid, call_id = await place(rt, seed)
 
+    queued = (await client.get("/api/calls?status=queued")).json()
+    assert [c["id"] for c in queued] == [call_id]
+
+    state = (await client.get("/api/phone")).json()
+    assert state["call"]["id"] == call_id and state["waiting"] == 0 and state["busy"] is False
+    assert state["call"]["to"] == seed.provider_phone and state["call"]["goal"]
+
     ringing = (await client.get("/api/calls?status=ringing")).json()
-    assert [c["id"] for c in ringing] == [call_id]
-    assert ringing[0]["to"] == seed.provider_phone and ringing[0]["goal"]
+    assert [c["id"] for c in ringing] == [call_id], "offering it is what makes it ring"
 
     page = (await client.get("/phone")).text
     assert "Incoming call" in page and "Hold to talk" in page
@@ -55,13 +62,13 @@ async def test_declining_reaches_the_retry_ladder(client, rt, seed):
     inst = await load(rt, iid)
     assert inst.attempt_count == 1 and inst.wake_reason == "retry"
     assert "call_missed" in await events(rt, iid)
-    assert (await client.get("/api/calls?status=ringing")).json() == []
+    assert (await client.get("/api/calls?status=waiting")).json() == []
 
 
 async def test_a_call_can_be_read_back_while_it_runs(client, rt, seed):
     _iid, call_id = await place(rt, seed)
     body = (await client.get(f"/api/calls/{call_id}")).json()
-    assert body["status"] == "ringing" and body["transcript"] == []
+    assert body["status"] == "queued" and body["transcript"] == []
     assert (await client.get(f"/api/calls/{seed.client_id}")).status_code == 404
 
 

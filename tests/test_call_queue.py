@@ -50,6 +50,7 @@ async def test_nothing_is_offered_while_a_call_is_live(rt, seed):
     await place(rt, seed, name="two")
 
     async with rt.session_factory() as s, s.begin():
+        await offer_next(s, rt.clock)          # queued -> ringing
         await answer_call(s, first, rt.clock.now())
 
     offered, waiting, busy = await state(rt)
@@ -107,13 +108,14 @@ async def test_ringing_out_brings_the_next_call_forward_at_once(rt, seed):
     await sweep_calls(rt.session_factory, rt.clock, rt.engine)
 
     offered, waiting, _ = await state(rt)
-    assert offered == second and waiting == 0
+    assert offered == second and waiting == 0, "the next one is ringing now"
     assert offered != first
 
 
 async def test_the_sweep_leaves_a_live_call_alone(rt, seed):
     call_id = await place(rt, seed)
     async with rt.session_factory() as s, s.begin():
+        await offer_next(s, rt.clock)
         await answer_call(s, call_id, rt.clock.now())
     rt.clock.advance(RING_TIMEOUT * 5)
 
@@ -142,3 +144,24 @@ async def test_a_call_rings_for_a_minute(rt, seed):
 
     rt.clock.advance(timedelta(seconds=2))
     assert (await sweep_calls(rt.session_factory, rt.clock, rt.engine))["timed_out"] == str(call_id)
+
+
+async def test_queued_and_ringing_are_different_things(rt, seed):
+    """`ringing` used to be set the moment a call was placed, so it covered both a call
+    nobody could hear and the one actually being offered. The status now says which."""
+    from app.voice.repository import ringing_call, waiting_calls
+
+    first = await place(rt, seed, name="one")
+    second = await place(rt, seed, name="two")
+
+    async with rt.session_factory() as s:
+        assert [c.status for c in await waiting_calls(s)] == ["queued", "queued"]
+        assert await ringing_call(s) is None, "nothing is ringing until it is offered"
+
+    async with rt.session_factory() as s, s.begin():
+        await offer_next(s, rt.clock)
+
+    async with rt.session_factory() as s:
+        statuses = {c.id: c.status for c in await waiting_calls(s)}
+        assert statuses[first] == "ringing" and statuses[second] == "queued"
+        assert (await ringing_call(s)).id == first, "exactly one is ringing"

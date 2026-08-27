@@ -15,7 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import CallRow
 
-LIVE_STATUSES = ("ringing", "active")
+# A call is `queued` when placed and `ringing` only while it is actually being
+# offered, so the status says which it is rather than the caller having to know that
+# a null ringing_since means nobody can hear it.
+WAITING_STATUSES = ("queued", "ringing")
+LIVE_STATUSES = ("queued", "ringing", "active")
 FINAL_STATUSES = ("completed", "missed", "failed")
 
 
@@ -33,7 +37,7 @@ async def place_call(
         id=uuid.uuid4(),
         instance_id=instance_id,
         contact_id=contact_id,
-        status="ringing",
+        status="queued",
         goal=goal,
         opening=opening,
         to_address=to_address,
@@ -49,9 +53,22 @@ async def get_call(session: AsyncSession, call_id: uuid.UUID) -> CallRow | None:
     return await session.get(CallRow, call_id)
 
 
-async def ringing_calls(session: AsyncSession) -> list[CallRow]:
-    stmt = select(CallRow).where(CallRow.status == "ringing").order_by(CallRow.created_at.asc())
+async def waiting_calls(session: AsyncSession) -> list[CallRow]:
+    """Everything placed and not yet answered - queued or ringing - oldest first."""
+    stmt = (
+        select(CallRow)
+        .where(CallRow.status.in_(WAITING_STATUSES))
+        # seq breaks the tie: two calls placed in the same instant - several instances
+        # waking together, or a virtual clock - would otherwise queue in random order.
+        .order_by(CallRow.created_at.asc(), CallRow.seq.asc())
+    )
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def ringing_call(session: AsyncSession) -> CallRow | None:
+    """The one being offered right now. At most one, by construction."""
+    stmt = select(CallRow).where(CallRow.status == "ringing").limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def live_call_for_instance(session: AsyncSession, instance_id: uuid.UUID) -> CallRow | None:
@@ -66,8 +83,11 @@ async def live_call_for_instance(session: AsyncSession, instance_id: uuid.UUID) 
 
 
 async def answer_call(session: AsyncSession, call_id: uuid.UUID, now: datetime) -> CallRow | None:
+    """Valid from queued or ringing: the queue decides what to *offer*, not what a
+    person is allowed to pick up. What it refuses is answering a call that is already
+    active or finished."""
     call = await get_call(session, call_id)
-    if call is None or call.status != "ringing":
+    if call is None or call.status not in WAITING_STATUSES:
         return None
     call.status = "active"
     call.answered_at = now

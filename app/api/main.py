@@ -26,7 +26,7 @@ from app.events import list_events
 from app.review import list_pending_review_tasks
 from app.workflows.types import list_types, upsert_type
 from app.voice.queue import offer_next
-from app.voice.repository import get_call, ringing_calls
+from app.voice.repository import get_call, waiting_calls
 from app.voice.session import VoiceCallSession, miss_call
 from app.runtime import Runtime, build_runtime, ensure_schema, get_runtime
 from app.config import get_settings
@@ -440,8 +440,11 @@ async def api_phone(runtime: Runtime = Depends(rt)):
 @app.get("/api/calls")
 async def api_calls(status: str | None = None, s: AsyncSession = Depends(session)):
     """Every call in a state, unfiltered. The phone page uses /api/phone instead."""
-    if status == "ringing" or status is None:
-        return [call_json(c) for c in await ringing_calls(s)]
+    if status in (None, "waiting", "queued", "ringing"):
+        calls = await waiting_calls(s)
+        if status in ("queued", "ringing"):
+            calls = [c for c in calls if c.status == status]
+        return [call_json(c) for c in calls]
     from sqlalchemy import select as _select
 
     from app.db.models import CallRow

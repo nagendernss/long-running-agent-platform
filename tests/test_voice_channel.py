@@ -35,7 +35,7 @@ async def test_sending_on_the_call_channel_places_a_call_and_returns(rt, seed):
     iid = await start_medical(rt, seed)
 
     call = await latest_call(rt, iid)
-    assert call is not None and call.status == "ringing"
+    assert call is not None and call.status == "queued", "placed, not yet offered to anyone"
     assert call.to_address == seed.provider_phone
     assert call.opening.startswith("Hi Mercy Hospital Records")
     assert "records" in call.goal.lower()

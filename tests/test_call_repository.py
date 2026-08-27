@@ -9,7 +9,7 @@ from app.voice.repository import (
     finish_call,
     live_call_for_instance,
     place_call,
-    ringing_calls,
+    waiting_calls,
     transcript_text,
 )
 
@@ -24,12 +24,24 @@ async def place(rt, seed, instance_id=None):
         return call.id
 
 
-async def test_a_call_starts_ringing_and_is_waiting_to_be_answered(rt, seed):
+async def test_a_placed_call_is_queued_not_ringing(rt, seed):
+    """Placed is not ringing: nobody can hear it until the queue offers it."""
     call_id = await place(rt, seed)
     async with rt.session_factory() as s:
-        waiting = await ringing_calls(s)
+        waiting = await waiting_calls(s)
     assert [c.id for c in waiting] == [call_id]
+    assert waiting[0].status == "queued" and waiting[0].ringing_since is None
     assert waiting[0].to_address == "+15550100" and waiting[0].transcript == []
+
+
+async def test_a_finished_call_cannot_be_answered(rt, seed):
+    """The queue decides what to offer; it does not police what a person picks up. What
+    is refused is answering a call that is already over."""
+    call_id = await place(rt, seed)
+    async with rt.session_factory() as s, s.begin():
+        await finish_call(s, call_id, "missed", rt.clock.now())
+    async with rt.session_factory() as s, s.begin():
+        assert await answer_call(s, call_id, rt.clock.now()) is None
 
 
 async def test_answering_moves_it_to_active_once(rt, seed):
@@ -51,7 +63,7 @@ async def test_turns_are_appended_in_order_and_survive_separately(rt, seed):
         await append_turn(s, call_id, "agent", "Where should we send it?", rt.clock.now(), source="gemini")
 
     async with rt.session_factory() as s:
-        call = (await ringing_calls(s))[0]
+        call = (await waiting_calls(s))[0]
     assert [t["who"] for t in call.transcript] == ["agent", "contact", "agent"]
     assert call.transcript[1]["text"] == "We need an authorization first."
     assert call.transcript[2]["source"] == "gemini"
@@ -65,7 +77,7 @@ async def test_only_the_other_party_counts_as_evidence(rt, seed):
         await append_turn(s, call_id, "agent", "Is there a fee of forty five dollars?", rt.clock.now())
         await append_turn(s, call_id, "contact", "No, there is no fee.", rt.clock.now())
     async with rt.session_factory() as s:
-        call = (await ringing_calls(s))[0]
+        call = (await waiting_calls(s))[0]
     assert transcript_text(call) == "No, there is no fee."
 
 
@@ -83,7 +95,7 @@ async def test_a_finished_call_is_no_longer_ringing(rt, seed):
     async with rt.session_factory() as s, s.begin():
         await finish_call(s, call_id, "missed", rt.clock.now())
     async with rt.session_factory() as s:
-        assert await ringing_calls(s) == []
+        assert await waiting_calls(s) == []
 
 
 async def test_only_final_statuses_can_finish_a_call(rt, seed):

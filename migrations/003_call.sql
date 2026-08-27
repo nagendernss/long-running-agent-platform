@@ -5,7 +5,7 @@ CREATE TABLE call (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     instance_id UUID REFERENCES workflow_instance(id),
     contact_id  UUID REFERENCES contact(id),
-    status      TEXT NOT NULL DEFAULT 'ringing',   -- ringing | active | completed | missed | failed
+    status      TEXT NOT NULL DEFAULT 'queued',    -- queued | ringing | active | completed | missed | failed
     goal        TEXT,                              -- what the agent is trying to achieve
     opening     TEXT,                              -- the first thing it says
     channel     TEXT NOT NULL DEFAULT 'call',
