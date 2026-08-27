@@ -48,7 +48,7 @@ async def test_the_goal_comes_from_what_the_workflow_already_declares(rt):
     goal = build_goal(rt.registry.get("medical_records_followup"))
     assert "RECORDS_RECEIVED" in goal and "AUTH_REQUIRED" in goal
     assert "authorization" in goal.lower(), "the signal docstrings carry the domain"
-    assert "fee" in goal.lower(), "and the standing instruction covers requirements"
+    assert "do not raise money yourself" in goal.lower(), "it records a fee, it does not go asking"
 
 
 async def test_a_second_call_is_not_placed_over_a_live_one(rt, seed):
