@@ -44,6 +44,28 @@ def build_brain(settings: Settings, registry: WorkflowRegistry, field_registry: 
 
 
 @dataclass
+class VoiceStack:
+    """What a live call needs. Absent unless voice is switched on, so the default
+    server never loads a speech model it will not use."""
+
+    stt: object
+    agent: object
+
+
+def build_voice(settings: Settings) -> "VoiceStack | None":
+    if not settings.voice_calls:
+        return None
+    from app.voice.agent import LlmCallAgent, ScriptedCallAgent
+    from app.voice.stt import WhisperSTT
+
+    if settings.gemini_api_keys:
+        agent = LlmCallAgent(settings.gemini_api_keys, model=settings.gemini_model)
+    else:  # no keys: the local model alone, or a fixed line if that is missing too
+        agent = LlmCallAgent(["unset"], model=settings.gemini_model)
+    return VoiceStack(stt=WhisperSTT(settings.stt_model), agent=agent)
+
+
+@dataclass
 class Runtime:
     settings: Settings
     clock: Clock
@@ -55,6 +77,7 @@ class Runtime:
     registry: WorkflowRegistry
     field_registry: FieldRegistry
     engine: Engine
+    voice: VoiceStack | None = None
 
     async def close(self) -> None:
         if self.procrastinate_app is not None:
@@ -107,6 +130,11 @@ async def build_runtime(
     settings = settings or get_settings()
     clock = clock or SystemClock()
     channel = channel or MockChannel()
+    voice = build_voice(settings)
+    if voice is not None:
+        from app.channels import VoiceChannel
+
+        channel = VoiceChannel(channel, clock, registry=registry)
     registry = registry or default_registry()
 
     db_engine = make_engine(settings.sqlalchemy_url)
@@ -142,5 +170,6 @@ async def build_runtime(
         registry=registry,
         field_registry=field_registry,
         engine=engine,
+        voice=voice,
     )
     return _runtime

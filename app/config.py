@@ -17,6 +17,10 @@ class Settings:
     # quota, which is the failure we actually hit rather than a hypothetical one.
     gemini_api_keys: tuple[str, ...] = ()
     gemini_model: str = "gemini-3.6-flash"
+    # Voice is opt-in: switching it on loads a speech model and makes the call channel
+    # place real calls instead of logging them.
+    voice_calls: bool = False
+    stt_model: str = "small.en"
 
     @property
     def gemini_api_key(self) -> str | None:
@@ -62,4 +66,6 @@ def get_settings(database_url: str | None = None) -> Settings:
         agent_brain=brain,
         gemini_api_keys=keys,
         gemini_model=os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"),
+        voice_calls=(os.environ.get("VOICE_CALLS", "").strip().lower() in {"1", "true", "yes", "on"}),
+        stt_model=os.environ.get("STT_MODEL", "small.en"),
     )

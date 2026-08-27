@@ -1,0 +1,240 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Phone</h2>
+
+{% if not voice_enabled %}
+<div class="empty" style="border-color:var(--blocked);color:var(--blocked)">
+  Voice calls are off on this server. Start it with <code>VOICE_CALLS=1</code> (or
+  <code>--voice</code>) to take calls here.
+</div>
+{% endif %}
+
+<div id="idle" class="empty">Waiting for a call&hellip; <span class="dim">agents place them when a workflow calls a contact.</span></div>
+
+<section id="incoming" class="phone-card" hidden>
+  <div class="phone-ring">
+    <span class="phone-dot"></span>
+    <div>
+      <div class="phone-who">Incoming call</div>
+      <div class="dim mono" id="incoming-to"></div>
+    </div>
+  </div>
+  <p class="dim" id="incoming-goal"></p>
+  <div class="row">
+    <button id="answer" class="outcome">Answer</button>
+    <button id="decline">Decline</button>
+  </div>
+</section>
+
+<section id="live" class="phone-card" hidden>
+  <div class="phone-ring">
+    <span class="phone-dot live"></span>
+    <div>
+      <div class="phone-who">On a call</div>
+      <div class="dim mono" id="live-state">connecting&hellip;</div>
+    </div>
+  </div>
+
+  <div id="conversation" class="conversation"></div>
+
+  <div class="row">
+    <button id="talk">Hold to talk</button>
+    <label class="radio"><input type="checkbox" id="auto" checked> send when I stop speaking</label>
+    <button id="hangup">Hang up</button>
+  </div>
+  <p class="dim hint" id="hint">Speak normally. What you say is transcribed here; the agent replies out loud.</p>
+</section>
+
+<style>
+  .phone-card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+                padding:16px 18px; max-width:760px; }
+  .phone-ring { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
+  .phone-who { font-size:15px; }
+  .phone-dot { width:12px; height:12px; border-radius:50%; background:var(--blocked); flex:none; }
+  .phone-dot.live { background:var(--active); }
+  @media (prefers-reduced-motion: no-preference) {
+    .phone-dot { animation: hcpulse 1.1s ease-in-out infinite; }
+  }
+  @keyframes hcpulse { 0%,100% { opacity:1 } 50% { opacity:.25 } }
+  .conversation { margin:12px 0; max-height:340px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; }
+  .said { border:1px solid var(--line); border-left:2px solid var(--line); border-radius:8px;
+          padding:7px 11px; font-size:13px; max-width:80%; }
+  .said.agent { border-left-color:var(--accent); align-self:flex-start; }
+  .said.contact { border-left-color:var(--active); align-self:flex-end; }
+  .said .dim { font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; }
+  #talk.recording { border-color:var(--active); color:var(--active); }
+</style>
+
+<script>
+(() => {
+  const idle = document.getElementById('idle');
+  const incoming = document.getElementById('incoming');
+  const live = document.getElementById('live');
+  const conversation = document.getElementById('conversation');
+  const liveState = document.getElementById('live-state');
+  const talk = document.getElementById('talk');
+  const auto = document.getElementById('auto');
+
+  let current = null;      // the ringing call
+  let socket = null;
+  let recorder = null;
+  let chunks = [];
+  let speaking = false;    // the agent is talking: do not record it
+  let audioCtx = null;
+
+  const show = (el, on) => el.hidden = !on;
+
+  function say(who, text) {
+    if (!text) return;
+    const div = document.createElement('div');
+    div.className = `said ${who}`;
+    div.innerHTML = `<div class="dim">${who === 'agent' ? 'agent' : 'you'}</div>`;
+    div.appendChild(document.createTextNode(text));
+    conversation.appendChild(div);
+    conversation.scrollTop = conversation.scrollHeight;
+  }
+
+  // ---- ringing ------------------------------------------------------------------
+  async function poll() {
+    if (socket) return;
+    try {
+      const calls = await (await fetch('/api/calls?status=ringing')).json();
+      current = calls[0] || null;
+    } catch { current = null; }
+    show(incoming, !!current);
+    show(idle, !current);
+    if (current) {
+      document.getElementById('incoming-to').textContent = current.to || '';
+      document.getElementById('incoming-goal').textContent = (current.goal || '').split('\n')[0];
+      ring();
+    }
+  }
+
+  function ring() {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    try {
+      audioCtx = audioCtx || new AudioContext();
+      const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+      osc.frequency.value = 480; gain.gain.value = 0.04;
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(); osc.stop(audioCtx.currentTime + 0.35);
+    } catch {}
+  }
+
+  // ---- the call -----------------------------------------------------------------
+  document.getElementById('decline').onclick = async () => {
+    if (!current) return;
+    await fetch(`/api/calls/${current.id}/miss`, { method: 'POST' });
+    current = null; poll();
+  };
+
+  document.getElementById('answer').onclick = async () => {
+    if (!current) return;
+    const callId = current.id;
+    show(incoming, false); show(idle, false); show(live, true);
+    conversation.replaceChildren();
+
+    socket = new WebSocket(`ws://${location.host}/ws/call/${callId}`);
+    socket.onopen = () => { socket.send(JSON.stringify({ type: 'answer' })); liveState.textContent = 'connected'; };
+    socket.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'transcript' && msg.who === 'contact') say('contact', msg.text);
+      if (msg.type === 'speak') { say('agent', msg.text); speak(msg.text, msg.done); }
+      if (msg.type === 'error') { liveState.textContent = msg.text; }
+    };
+    socket.onclose = () => endCall();
+
+    await startMic();
+  };
+
+  document.getElementById('hangup').onclick = () => {
+    if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'hangup' }));
+    endCall();
+  };
+
+  function endCall() {
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+    recorder = null;
+    if (socket) { try { socket.close(); } catch {} socket = null; }
+    speechSynthesis.cancel();
+    show(live, false); show(idle, true);
+    current = null;
+  }
+
+  // The agent speaks with the voices already installed on this machine.
+  function speak(text, done) {
+    speaking = true;
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.05;
+    utterance.onend = () => { speaking = false; if (done) endCall(); };
+    utterance.onerror = () => { speaking = false; };
+    speechSynthesis.speak(utterance);
+  }
+
+  // ---- listening ----------------------------------------------------------------
+  async function startMic() {
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      liveState.textContent = 'no microphone - use hold to talk on another device';
+      return;
+    }
+    recorder = new MediaRecorder(stream);
+    recorder.ondataavailable = (e) => chunks.push(e.data);
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: 'audio/webm' });
+      chunks = [];
+      if (blob.size > 2000 && socket && socket.readyState === WebSocket.OPEN) {
+        liveState.textContent = 'thinking...';
+        blob.arrayBuffer().then((buf) => socket.send(buf));
+      }
+      if (auto.checked && socket) startTurn();
+    };
+    watchLevel(stream);
+    if (auto.checked) startTurn();
+  }
+
+  function startTurn() {
+    if (!recorder || recorder.state === 'recording' || speaking) return setTimeout(startTurn, 250);
+    recorder.start();
+    liveState.textContent = 'listening';
+    talk.classList.add('recording');
+  }
+
+  function endTurn() {
+    if (recorder && recorder.state === 'recording') recorder.stop();
+    talk.classList.remove('recording');
+  }
+
+  // Silence, not a timer, ends a turn: the browser can hear when you stopped.
+  function watchLevel(stream) {
+    audioCtx = audioCtx || new AudioContext();
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    audioCtx.createMediaStreamSource(stream).connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    let quietFor = 0, spokeAtAll = false;
+
+    setInterval(() => {
+      if (!recorder || recorder.state !== 'recording' || !auto.checked) return;
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (const v of data) sum += (v - 128) ** 2;
+      const level = Math.sqrt(sum / data.length);
+      if (level > 4) { spokeAtAll = true; quietFor = 0; }
+      else quietFor += 100;
+      if (spokeAtAll && quietFor >= 800) { spokeAtAll = false; quietFor = 0; endTurn(); }
+    }, 100);
+  }
+
+  talk.onmousedown = () => { auto.checked = false; startTurn(); };
+  talk.onmouseup = () => endTurn();
+  talk.onkeydown = (e) => { if (e.code === 'Space') { auto.checked = false; startTurn(); } };
+  talk.onkeyup = (e) => { if (e.code === 'Space') endTurn(); };
+
+  poll();
+  setInterval(poll, 2000);
+})();
+</script>
+{% endblock %}

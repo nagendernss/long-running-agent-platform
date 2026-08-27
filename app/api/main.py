@@ -2,13 +2,16 @@
 endpoint works for any workflow_type - nothing here knows a workflow by name."""
 from __future__ import annotations
 
+import contextlib
+import json
+import logging
 import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -22,10 +25,13 @@ from app.clock import OffsetClock, parse_duration
 from app.events import list_events
 from app.review import list_pending_review_tasks
 from app.workflows.types import list_types, upsert_type
+from app.voice.repository import get_call, ringing_calls
+from app.voice.session import VoiceCallSession, miss_call
 from app.runtime import Runtime, build_runtime, ensure_schema, get_runtime
 from app.config import get_settings
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -396,6 +402,110 @@ async def api_contact_facts(contact_id: uuid.UUID, s: AsyncSession = Depends(ses
         }
         for f in (await s.execute(stmt)).scalars().all()
     ]
+
+
+# ---------------------------------------------------------------- calls
+def call_json(call) -> dict[str, Any]:
+    return {
+        "id": str(call.id),
+        "instance_id": str(call.instance_id) if call.instance_id else None,
+        "status": call.status,
+        "to": call.to_address,
+        "opening": call.opening,
+        "goal": call.goal,
+        "transcript": call.transcript or [],
+        "created_at": call.created_at.isoformat() if call.created_at else None,
+        "ended_at": call.ended_at.isoformat() if call.ended_at else None,
+    }
+
+
+@app.get("/api/calls")
+async def api_calls(status: str | None = None, s: AsyncSession = Depends(session)):
+    """The phone page polls this to know whether anything is ringing."""
+    if status == "ringing" or status is None:
+        return [call_json(c) for c in await ringing_calls(s)]
+    from sqlalchemy import select as _select
+
+    from app.db.models import CallRow
+
+    stmt = _select(CallRow).where(CallRow.status == status).order_by(CallRow.created_at.desc()).limit(50)
+    return [call_json(c) for c in (await s.execute(stmt)).scalars().all()]
+
+
+@app.get("/api/calls/{call_id}")
+async def api_call(call_id: uuid.UUID, s: AsyncSession = Depends(session)):
+    call = await get_call(s, call_id)
+    if call is None:
+        raise HTTPException(404, "call not found")
+    return call_json(call)
+
+
+@app.post("/api/calls/{call_id}/miss")
+async def api_miss_call(call_id: uuid.UUID, runtime: Runtime = Depends(rt)):
+    """Declined, or nobody picked up. Goes through the same door as a real no-answer."""
+    await miss_call(runtime.session_factory, runtime.clock, runtime.engine, call_id)
+    return {"id": str(call_id), "status": "missed"}
+
+
+@app.websocket("/ws/call/{call_id}")
+async def call_socket(websocket: WebSocket, call_id: uuid.UUID):
+    """Audio up, sentences down.
+
+    The browser decides when a turn ended (it can hear the silence); the server does
+    the transcribing and the thinking. A socket that drops is a hang-up with whatever
+    was said so far - the call is over either way, and the transcript is still evidence.
+    """
+    runtime = get_runtime()
+    await websocket.accept()
+    voice = runtime.voice
+    if voice is None:
+        await websocket.send_json({"type": "error", "text": "voice calls are not enabled on this server"})
+        await websocket.close()
+        return
+
+    call_session = VoiceCallSession(
+        call_id=call_id, stt=voice.stt, agent=voice.agent,
+        session_factory=runtime.session_factory, clock=runtime.clock, engine=runtime.engine,
+    )
+    try:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            if (data := message.get("bytes")) is not None:
+                turn = await call_session.on_utterance(data)
+                await websocket.send_json({"type": "transcript", "who": "contact",
+                                           "text": call_session.transcript[-2]["text"]
+                                           if len(call_session.transcript) >= 2 else ""})
+                await websocket.send_json({"type": "speak", "text": turn.say, "done": turn.done,
+                                           "source": turn.source})
+                if turn.done:
+                    await call_session.on_hangup(reason=turn.reason or "agent ended the call")
+                    break
+                continue
+            payload = json.loads(message.get("text") or "{}")
+            if payload.get("type") == "answer":
+                opening = await call_session.on_answer()
+                await websocket.send_json({"type": "speak", "text": opening, "done": False, "source": "opening"})
+            elif payload.get("type") == "hangup":
+                await call_session.on_hangup(reason="they hung up")
+                break
+    except WebSocketDisconnect:
+        await call_session.on_hangup(reason="the line dropped")
+    except Exception:
+        log.exception("call %s failed", call_id)
+        await call_session.on_hangup(reason="call failed", status="failed")
+    finally:
+        await call_session.on_hangup(reason="socket closed")
+        with contextlib.suppress(Exception):
+            await websocket.close()
+
+
+@app.get("/phone", response_class=HTMLResponse)
+async def phone_page(request: Request, runtime: Runtime = Depends(rt)):
+    return TEMPLATES.TemplateResponse(
+        request, "phone.html", {"clock": clock_state(runtime), "voice_enabled": runtime.voice is not None}
+    )
 
 
 # ---------------------------------------------------------------- dashboard
