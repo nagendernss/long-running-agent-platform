@@ -678,8 +678,30 @@ async def instance_page(
         request, "instance.html",
         {"instance": inst, "events": events, "rounds": build_rounds(events),
          "reviews": reviews, "case": case, "contacts": contacts, "clock": clock_state(runtime),
-         "ladders": ladder_sizes(runtime), "options": await resolution_options(runtime, s, reviews)},
+         "ladders": ladder_sizes(runtime), "options": await resolution_options(runtime, s, reviews),
+         "outcomes": list(getattr(runtime.registry.get(inst.workflow_type), "resolution_options", []) or [])},
     )
+
+
+@app.post("/instances/{instance_id}/outcome")
+async def record_outcome_form(instance_id: uuid.UUID, request: Request, runtime: Runtime = Depends(rt)):
+    """"It is done" as a first-class action, not something you can only say when the
+    agent happens to have asked. Records which ending it was, so the timeline says
+    `records_received` rather than a bare close."""
+    form = await request.form()
+    action = (form.get("action") or "").strip()
+    if not action:
+        raise HTTPException(400, "an outcome needs an action")
+    async with runtime.session_factory() as s, s.begin():
+        try:
+            await runtime.engine.record_outcome(
+                s, instance_id, action, resolved_by=form.get("resolved_by") or "dashboard"
+            )
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+    return RedirectResponse(f"/instances/{instance_id}", status_code=303)
 
 
 @app.post("/advance")

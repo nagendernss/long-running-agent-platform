@@ -614,6 +614,54 @@ class Engine:
         if fact.status == "applied":
             await self._retry_after_correction(session, instance, fact, now)
 
+    async def record_outcome(
+        self, session: AsyncSession, instance_id: uuid.UUID, action: str, resolved_by: str
+    ) -> WorkflowInstance:
+        """A person recording what actually happened, without waiting to be asked.
+
+        A workflow's `resolution_options` are endings it already knows how to carry
+        out, and they were only reachable from a review task - so a chase that never
+        escalated could not be closed off at all. Someone who learns the records
+        arrived by other means (they turned up in the post, a colleague was told on
+        another line) had nowhere to say so, and the only always-present button was
+        the generic close, which records nothing about why it ended.
+
+        Same handler and the same audit trail as a review resolution; the difference
+        is only who started the conversation. The decision is written down as a
+        resolved review task because that is where this platform keeps the record of
+        a human deciding something.
+        """
+        instance = await self._lock_instance(session, instance_id)
+        if instance is None:
+            raise KeyError(f"instance not found: {instance_id}")
+        definition = self.definition_for(instance)
+        allowed = {o["action"] for o in getattr(definition, "resolution_options", []) or []}
+        if action not in allowed:
+            raise ValueError(
+                f"{instance.workflow_type} has no outcome {action!r}"
+                + (f" - it records {', '.join(sorted(allowed))}" if allowed else "")
+            )
+        if instance.status == "completed":
+            return instance
+
+        now = self.clock.now()
+        task = ReviewTask(
+            id=uuid.uuid4(), instance_id=instance.id, reason="outcome_recorded",
+            context_snapshot={"state": instance.state, "attempt_count": instance.attempt_count},
+            suggested_options=[], status="resolved", resolution={"action": action},
+            resolved_by=resolved_by, created_at=now, resolved_at=now,
+        )
+        session.add(task)
+        await session.flush()
+        await log_event(
+            session, instance.id, "outcome_recorded",
+            {"outcome": action, "by": resolved_by, "source": "staff"}, now=now,
+        )
+        instance.updated_at = now
+        await definition.on_review_resolved(instance, task, self.ctx(session))
+        await session.flush()
+        return instance
+
     async def _rearm_wake_if_unblocked(
         self, session: AsyncSession, instance: WorkflowInstance, was_blocked: bool,
         token_before: str | None, now: datetime,

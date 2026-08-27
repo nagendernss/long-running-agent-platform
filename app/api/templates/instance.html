@@ -58,6 +58,22 @@
 </table>
 {% endif %}
 
+{% if instance.status != 'completed' and outcomes %}
+{# The endings this workflow knows how to record, always available. Waiting for the
+   agent to ask is not a plan: staff learn things on other lines, and "it arrived"
+   should not have to be typed as a fake inbound message to be heard. #}
+<h2>Record what happened</h2>
+<div class="row">
+  {% for o in outcomes %}
+  <form class="inline" method="post" action="/instances/{{ instance.id }}/outcome">
+    <input type="hidden" name="action" value="{{ o.action }}">
+    <button type="submit" class="outcome">{{ o.label }}</button>
+  </form>
+  {% endfor %}
+</div>
+<p class="dim" style="margin:6px 0 0">Ends the chase the same way the agent would have, and tells the client.</p>
+{% endif %}
+
 {% if instance.status != 'completed' %}
 <h2>Reply as {{ (contacts.get('target_contact_id').name if contacts.get('target_contact_id') else 'the other party') }}</h2>
 <form method="post" action="/instances/{{ instance.id }}/inbound" class="reply">

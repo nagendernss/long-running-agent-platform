@@ -448,3 +448,44 @@ async def test_a_resolve_form_with_no_action_is_refused(client, rt, seed):
     r = await client.post(f"/review-queue/{task['id']}/resolve", data={})
     assert r.status_code == 400
     assert (await client.get(f"/api/instances/{iid}")).json()["status"] == "blocked", "still waiting"
+
+
+async def test_records_received_can_be_recorded_without_waiting_to_be_asked(client, rt, seed):
+    """Reported: "there should always be an option to mark as close if we have received
+    records". The workflow's endings were only reachable from a review task, so an
+    instance that never escalated could not be closed off at all - and the only
+    always-present button was a generic close that records nothing about why."""
+    r = await client.post(
+        "/api/instances",
+        json={"workflow_type": "medical_records_followup", "case_id": str(seed.case_id),
+              "context": medical_context(seed)},
+    )
+    iid = r.json()["id"]
+
+    page = (await client.get(f"/instances/{iid}")).text
+    assert "Record what happened" in page
+    assert 'value="records_received"' in page and "records received" in page
+    assert 'value="auth_obtained"' in page
+
+    r = await client.post(f"/instances/{iid}/outcome", data={"action": "records_received"})
+    assert r.status_code == 303
+
+    body = (await client.get(f"/api/instances/{iid}")).json()
+    assert body["status"] == "completed" and body["state"] == "completed"
+    # the client is told, exactly as the RECORDS_RECEIVED signal path would have done
+    assert any("has sent your medical records" in m.body for m in rt.channel.outbox if m.channel == "sms")
+
+    page = (await client.get(f"/instances/{iid}")).text
+    assert "Record what happened" not in page, "nothing left to record"
+
+
+async def test_an_outcome_a_workflow_does_not_have_is_refused(client, rt, seed):
+    r = await client.post(
+        "/api/instances",
+        json={"workflow_type": "medical_records_followup", "case_id": str(seed.case_id),
+              "context": medical_context(seed)},
+    )
+    iid = r.json()["id"]
+    r = await client.post(f"/instances/{iid}/outcome", data={"action": "acknowledged"})
+    assert r.status_code == 400
+    assert (await client.get(f"/api/instances/{iid}")).json()["status"] == "active"
