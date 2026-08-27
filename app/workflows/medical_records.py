@@ -48,6 +48,8 @@ def _fmt(dt) -> str:
 
 
 class MedicalRecordsFollowupWorkflow(BaseWorkflow):
+    """Chase a provider for a client's medical records until they arrive."""
+
     workflow_type: ClassVar[str] = "medical_records_followup"
     initial_state: ClassVar[str] = "awaiting_reply"
     retry_policy: ClassVar[dict[str, Any]] = {"no_answer": {"schedule": ["2d", "5d", "14d"]}}

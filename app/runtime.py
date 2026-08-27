@@ -130,12 +130,16 @@ async def build_runtime(
     settings = settings or get_settings()
     clock = clock or SystemClock()
     channel = channel or MockChannel()
+    # Built before the voice channel, not after: VoiceChannel captures the registry to
+    # work out what a call is for, and it used to be handed the None this argument
+    # defaults to - so every real call went out with the generic fallback goal while
+    # the tests, which pass a registry explicitly, saw the right one.
+    registry = registry or default_registry()
     voice = build_voice(settings)
     if voice is not None:
         from app.channels import VoiceChannel
 
         channel = VoiceChannel(channel, clock, registry=registry)
-    registry = registry or default_registry()
 
     db_engine = make_engine(settings.sqlalchemy_url)
     session_factory = make_session_factory(db_engine)

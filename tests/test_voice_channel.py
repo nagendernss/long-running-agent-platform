@@ -79,3 +79,56 @@ async def test_other_channels_are_untouched(rt, seed):
     texted = [m for m in rt.channel.outbox if m.channel == "sms"]
     assert texted and texted[-1].address == seed.client_phone
     assert not [m for m in rt.channel.outbox if m.channel == "call"], "calls do not go to the mock"
+
+
+async def test_a_call_placed_by_a_server_built_runtime_knows_what_it_is_chasing(settings, schema):
+    """The bug this catches: build_runtime took `registry=None`, handed that straight
+    to VoiceChannel, and only then built the default registry. Every call the real
+    server placed went out with the generic fallback goal - "find out what they can
+    tell us" - with no mention of records, authorizations or refusals. Every test
+    passed a registry explicitly, so every test saw the right goal.
+
+    So this one builds the runtime the way scripts/serve.py does: no registry.
+    """
+    import uuid as _uuid
+    from dataclasses import replace
+
+    from app.channels import MockChannel
+    from app.clock import FakeClock
+    from app.db.models import CaseRecord, Contact
+    from app.runtime import build_runtime
+
+    # voice on, and no registry argument - exactly how scripts/serve.py builds it
+    rt = await build_runtime(replace(settings, voice_calls=True), clock=FakeClock(),
+                             channel=MockChannel(), durable=False)
+    try:
+        async with rt.session_factory() as s, s.begin():
+            provider = Contact(id=_uuid.uuid4(), name="Mercy Hospital Records", role="provider",
+                               phone="+15550100", created_at=rt.clock.now())
+            client = Contact(id=_uuid.uuid4(), name="Jane Okafor", role="client",
+                             phone="+15550001", created_at=rt.clock.now())
+            s.add_all([provider, client])
+            await s.flush()
+            case = CaseRecord(id=_uuid.uuid4(), client_contact_id=client.id,
+                              matter_type="personal_injury", created_at=rt.clock.now())
+            s.add(case)
+            await s.flush()
+            inst = await rt.engine.start_instance(
+                s, "medical_records_followup", case_id=case.id,
+                context={"target_contact_id": str(provider.id), "provider_contact_id": str(provider.id),
+                         "client_contact_id": str(client.id), "provider_channel": "call",
+                         "client_channel": "sms"},
+            )
+            instance_id = inst.id
+
+        async with rt.session_factory() as s:
+            call = (await s.execute(
+                select(CallRow).where(CallRow.instance_id == instance_id)
+            )).scalars().first()
+
+        assert call is not None, "the initial attempt places a call"
+        assert "RECORDS_RECEIVED" in call.goal, "the agent must know what it is listening for"
+        assert "AUTH_REQUIRED" in call.goal and "REQUEST_DENIED" in call.goal
+        assert "medical records" in call.goal, "and what the whole call is for"
+    finally:
+        await rt.close()
