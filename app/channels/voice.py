@@ -44,8 +44,9 @@ def build_goal(definition, instance_context: dict | None = None) -> str:
     if outcomes:
         parts.append("Find out whether any of these apply, and capture the particulars:\n" + "\n".join(outcomes))
     parts.append(
-        "Also capture anything they correct about how to reach them, anything they need from us first "
-        "(a fee, a form, a portal), and when to call back if they ask for that."
+        "Also capture anything they correct about how to reach them, anything they say we must do "
+        "before they can proceed, and when to call back if they ask for that. Do not raise money "
+        "yourself - only record what they volunteer."
     )
     return "\n\n".join(p for p in parts if p)
 

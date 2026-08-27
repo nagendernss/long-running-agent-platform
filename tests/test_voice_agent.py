@@ -174,3 +174,27 @@ def test_the_agent_is_told_it_is_reading_a_transcription():
     assert "spell it out" in system, "for anything that has to be exact"
     assert "did not catch it rather than guessing" in system
     assert "wrong facts on a client's file" in system, "the reason it matters"
+
+
+def test_the_agent_never_brings_up_money_itself():
+    """Asking a records desk "is there a fee?" invents an obstacle that may not exist,
+    and puts a number in the transcript that nobody quoted."""
+    from app.voice.agent import SYSTEM
+
+    system = SYSTEM.format(goal=GOAL, opening=OPENING)
+    assert "Never raise money yourself" in system
+    assert "Do not ask whether there is a fee" in system
+    assert "take the details down and repeat them back" in system, "but capture it if they do"
+
+
+def test_the_goal_does_not_prompt_asking_about_a_fee():
+    from app.channels.voice import build_goal
+
+    class Definition:
+        """A workflow."""
+
+        domain_signals: list = []
+
+    goal = build_goal(Definition())
+    assert "Do not raise money yourself" in goal
+    assert "a fee, a form, a portal" not in goal, "that phrasing invited the question"
