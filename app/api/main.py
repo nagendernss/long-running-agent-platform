@@ -711,7 +711,12 @@ async def resolve_form(task_id: uuid.UUID, request: Request, runtime: Runtime = 
     fee or submitting a portal form - it rides along on the instance and gets cited in
     the next message to the other party."""
     form = await request.form()
-    resolution: dict[str, Any] = {"action": form.get("action") or "close"}
+    # No default. "close" completes the whole instance, and falling back to it when a
+    # form arrives without an action would end a two-week chase on a dropped field.
+    action = (form.get("action") or "").strip()
+    if not action:
+        raise HTTPException(400, "a resolution needs an action")
+    resolution: dict[str, Any] = {"action": action}
     reference = (form.get("reference") or "").strip()
     if reference:
         resolution["reference"] = reference

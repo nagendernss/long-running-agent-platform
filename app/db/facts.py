@@ -25,7 +25,9 @@ async def get_current_fact(
             EntityFactVersion.field == field,
             EntityFactVersion.status == "applied",
         )
-        .order_by(EntityFactVersion.created_at.desc())
+        # seq breaks the tie: several facts can land in one transaction, and which
+        # value the platform uses must not depend on row order.
+        .order_by(EntityFactVersion.created_at.desc(), EntityFactVersion.seq.desc())
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none()

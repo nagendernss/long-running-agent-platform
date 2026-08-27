@@ -1,6 +1,12 @@
 {# One review-queue row. Every option offered here is one the engine can actually
-   carry out - a suggestion with no button behind it is just noise. #}
+   carry out - a suggestion with no button behind it is just noise, and a button
+   that does more than it says is worse.
+
+   Tasks come in kinds, and the kind decides the buttons. A verdict on one fact must
+   not be able to end a two-week chase, so a fact row offers apply and reject and
+   nothing else; "close" belongs on rows that really are about whether to keep going. #}
 {% set req = (t.context_snapshot or {}).get('requirement') %}
+{% set fact_id = (t.context_snapshot or {}).get('fact_id') %}
 <tr>
   <td class="dim mono">{{ t.created_at.strftime('%m-%d %H:%M') if t.created_at }}</td>
   <td>
@@ -11,6 +17,14 @@
         {% for key, value in (req.details or {}).items() %}
           <span class="kv"><span class="dim">{{ key }}</span> {{ value }}</span>
         {% endfor %}
+      </div>
+    {% elif fact_id %}
+      <span class="pill">unsure</span>
+      <div class="req-summary">
+        Heard a new <strong>{{ t.context_snapshot.get('field') }}</strong>, but not confidently enough to use it.
+      </div>
+      <div class="req-details">
+        <span class="kv"><span class="dim">heard</span> {{ t.context_snapshot.get('new_value') }}</span>
       </div>
     {% else %}
       {{ t.reason }}
@@ -23,37 +37,53 @@
     {% endif %}
   </td>
   <td>
-    {% if req %}
-      <form method="post" action="/review-queue/{{ t.id }}/resolve" class="resolve">
-        <input type="hidden" name="action" value="completed">
-        <input type="text" name="reference" placeholder="reference (e.g. chk-1041)" size="18">
-        <button type="submit" title="Records this as done; the agent resumes and cites the reference">
-          mark done &amp; resume
+    {% if fact_id %}
+      {# A verdict on one value. Neither button touches the workflow. #}
+      <form class="inline" method="post" action="/review-queue/{{ t.id }}/resolve">
+        <input type="hidden" name="action" value="apply">
+        <button type="submit" class="outcome" title="Use this value from now on. If it changes how to reach them, the agent tries again shortly.">
+          apply
         </button>
       </form>
+      <form class="inline" method="post" action="/review-queue/{{ t.id }}/resolve">
+        <input type="hidden" name="action" value="reject">
+        <button type="submit" title="Keep the old value. The row stays on file as a wrong extraction.">
+          reject
+        </button>
+      </form>
+    {% else %}
+      {% if req %}
+        <form method="post" action="/review-queue/{{ t.id }}/resolve" class="resolve">
+          <input type="hidden" name="action" value="completed">
+          <input type="text" name="reference" placeholder="reference (e.g. chk-1041)" size="18">
+          <button type="submit" title="Records this as done; the agent resumes and cites the reference">
+            mark done &amp; resume
+          </button>
+        </form>
+      {% endif %}
+
+      {% for opt in (options.get(t.id|string) or []) %}
+      <form class="inline" method="post" action="/review-queue/{{ t.id }}/resolve">
+        <input type="hidden" name="action" value="{{ opt.action }}">
+        <button type="submit" class="outcome" title="Record what actually happened and finish this step">{{ opt.label }}</button>
+      </form>
+      {% endfor %}
+
+      <form method="post" action="/review-queue/{{ t.id }}/resolve" class="resolve">
+        <input type="hidden" name="action" value="retry">
+        <select name="channel" title="Stored as this contact's preferred channel, then outreach resumes">
+          <option value="">same channel</option>
+          <option value="call">try by call</option>
+          <option value="sms">try by SMS</option>
+          <option value="email">try by email</option>
+        </select>
+        <button type="submit">retry</button>
+      </form>
+
+      <form class="inline" method="post" action="/review-queue/{{ t.id }}/resolve">
+        <input type="hidden" name="action" value="close">
+        <button type="submit" title="Stop chasing and complete the whole instance">close</button>
+      </form>
     {% endif %}
-
-    {% for opt in (options.get(t.id|string) or []) %}
-    <form class="inline" method="post" action="/review-queue/{{ t.id }}/resolve">
-      <input type="hidden" name="action" value="{{ opt.action }}">
-      <button type="submit" class="outcome" title="Record what actually happened and finish this step">{{ opt.label }}</button>
-    </form>
-    {% endfor %}
-
-    <form method="post" action="/review-queue/{{ t.id }}/resolve" class="resolve">
-      <input type="hidden" name="action" value="retry">
-      <select name="channel" title="Stored as this contact's preferred channel, then outreach resumes">
-        <option value="">same channel</option>
-        <option value="call">try by call</option>
-        <option value="sms">try by SMS</option>
-        <option value="email">try by email</option>
-      </select>
-      <button type="submit">retry</button>
-    </form>
-
-    <form class="inline" method="post" action="/review-queue/{{ t.id }}/resolve">
-      <input type="hidden" name="action" value="close">
-      <button type="submit" title="Stop chasing and complete the instance">close</button>
-    </form>
   </td>
 </tr>

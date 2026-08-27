@@ -391,3 +391,60 @@ async def test_header_controls_stay_reachable_while_scrolling(client, rt, seed):
     header_css = page.split("header {")[1].split("}")[0]
     assert "position:sticky" in header_css and "top:0" in header_css
     assert "z-index" in header_css
+
+
+async def test_the_dashboard_offers_a_verdict_on_an_unsure_fact_and_nothing_heavier(client, rt, seed):
+    """Reported: "i was not seeing accept/reject options on UI". The engine had been
+    recording suggested_options=["apply","reject"] since the beginning and the queue
+    rendered neither - what it did offer was `close`, which completes the instance.
+    So a reviewer declining one guessed email address could end a records chase."""
+    from app.signals import EntityUpdate
+
+    r = await client.post(
+        "/api/instances",
+        json={"workflow_type": "medical_records_followup", "case_id": str(seed.case_id),
+              "context": medical_context(seed)},
+    )
+    iid = r.json()["id"]
+    async with rt.session_factory() as s, s.begin():
+        inst = await rt.engine._lock_instance(s, iid)
+        await rt.engine.advance_instance(s, inst, [EntityUpdate(
+            entity_type="contact", entity_id=str(seed.provider_id), field="email",
+            new_value="abc@gmail.com", confidence=0.6, evidence="abc at gmail dot com",
+        )])
+
+    page = (await client.get("/")).text
+    assert 'value="apply"' in page and 'value="reject"' in page, "the verdict must be on the page"
+    assert "abc@gmail.com" in page, "show what was heard, not just the reason code"
+    row = page[page.index("abc@gmail.com"):]
+    row = row[:row.index("</tr>")]
+    assert 'value="close"' not in row, "a fact verdict must not be able to complete the instance"
+
+    task = next(t for t in (await client.get("/api/review-queue")).json() if t["instance_id"] == iid)
+    r = await client.post(f"/review-queue/{task['id']}/resolve", data={"action": "apply"})
+    assert r.status_code == 303
+
+    body = (await client.get(f"/api/instances/{iid}")).json()
+    assert body["status"] == "active", "the chase carries on"
+    facts = (await client.get(f"/api/contacts/{seed.provider_id}/facts")).json()
+    assert any(f["field"] == "email" and f["new_value"] == "abc@gmail.com" for f in facts)
+
+
+async def test_a_resolve_form_with_no_action_is_refused(client, rt, seed):
+    """`{"action": form.get("action") or "close"}` meant a dropped field completed the
+    instance. Silence is not a decision to stop chasing."""
+    r = await client.post(
+        "/api/instances",
+        json={"workflow_type": "medical_records_followup", "case_id": str(seed.case_id),
+              "context": medical_context(seed)},
+    )
+    iid = r.json()["id"]
+    from app.signals import NeedsHuman
+    async with rt.session_factory() as s, s.begin():
+        inst = await rt.engine._lock_instance(s, iid)
+        await rt.engine.advance_instance(s, inst, [NeedsHuman(reason="caller_requested_human")])
+
+    task = next(t for t in (await client.get("/api/review-queue")).json() if t["instance_id"] == iid)
+    r = await client.post(f"/review-queue/{task['id']}/resolve", data={})
+    assert r.status_code == 400
+    assert (await client.get(f"/api/instances/{iid}")).json()["status"] == "blocked", "still waiting"

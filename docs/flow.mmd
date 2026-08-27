@@ -1,0 +1,85 @@
+    %% HelloCounsel - one instance, end to end.
+    %% Traced from instance 1b36ceda (medical_records_followup), event.seq 774-824.
+    %% Render: https://mermaid.live, VS Code "Markdown Preview Mermaid Support",
+    %%         or `mmdc -i docs/flow.mmd -o docs/flow.svg`.
+    sequenceDiagram
+        autonumber
+        actor Staff
+        participant API as FastAPI
+        participant ENG as Engine
+        participant WF as Workflow<br/>(medical_records_followup)
+        participant SCH as Scheduler<br/>(Procrastinate)
+        participant CH as VoiceChannel
+        participant PH as Phone (browser)
+        participant VS as CallSession
+        participant BR as AgentBrain (Gemini)
+        participant DB as Postgres
+
+        Staff->>API: POST /api/agents
+        API->>ENG: start_instance(type, context)
+        ENG->>DB: workflow_instance + event:instance_created
+        ENG->>SCH: schedule_wake(now, "initial_send")
+        SCH->>DB: procrastinate_jobs(scheduled_at, lock=instance:id)
+
+        rect rgb(240,245,250)
+        Note over SCH,DB: wake fires - one per instance, ever
+        SCH->>ENG: execute_instance_wakeup(id, wake_token)
+        ENG->>DB: token still current?
+        ENG->>DB: event:attempt_started<br/>idempotency_key = id:token
+        Note right of DB: UNIQUE - a duplicate wake<br/>dies here, before side effects
+        ENG->>WF: attempt(ctx)
+        WF->>ENG: ctx.send(channel="call")
+        ENG->>CH: send(contact, body, goal)
+        CH->>DB: call row status=queued
+        CH-->>ENG: returns immediately
+        ENG->>SCH: schedule_wake(+3d, "response_timeout")
+        ENG->>DB: COMMIT
+        end
+
+        rect rgb(248,244,236)
+        Note over PH,VS: outside the transaction - a call lasts minutes
+        PH->>API: GET /api/phone (poll)
+        API->>DB: offer_next() -> queued -> ringing
+        API-->>PH: ring
+        Staff->>PH: Answer
+        PH->>API: WS /ws/call/{id}
+        API->>DB: status=active, answered_at
+        loop each turn
+            PH->>VS: audio bytes
+            VS->>VS: whisper small.en -> text
+            VS->>BR: goal + history + heard
+            BR-->>VS: {say, done}
+            VS->>DB: append transcript turn
+            VS-->>PH: speak(text, done)
+        end
+        VS->>DB: status=completed, ended_at
+        end
+
+        rect rgb(240,245,250)
+        Note over VS,ENG: transcript re-enters by the same door as an SMS reply
+        VS->>ENG: handle_inbound(instance, text, channel="call")
+        ENG->>BR: extract_signals(text, context)
+        BR-->>ENG: [ENTITY_UPDATE phone 0.95]<br/>[ACTION_REQUIRED payment $45]
+        ENG->>DB: event:signals_extracted
+        end
+
+        alt confidence >= threshold
+            ENG->>DB: entity_fact_version status=applied
+            ENG->>SCH: schedule_wake(+5min, "retry_after_correction")
+            Note right of SCH: old job cancelled,<br/>new wake_token issued
+        else below threshold
+            ENG->>DB: entity_fact_version status=proposed
+            ENG->>DB: review_task(low_confidence_fact)
+        end
+
+        opt ACTION_REQUIRED
+            ENG->>DB: review_task(action_required:payment)
+            ENG->>CH: send(client, "they need something from us")
+            Note over ENG: never asks about money on the call
+        end
+
+        Staff->>API: POST /review-queue/{id}/resolve
+        API->>ENG: resolve(action="completed")
+        ENG->>DB: requirement -> context.completed_requirements
+        ENG->>SCH: schedule_wake(now, "resume_after_requirement")
+        Note over SCH,ENG: loops back to the wake block

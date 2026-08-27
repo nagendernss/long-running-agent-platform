@@ -71,6 +71,9 @@ class Event(Base):
 class EntityFactVersion(Base):
     __tablename__ = "entity_fact_version"
     id: Mapped[uuid.UUID] = _uuid_pk()
+    # insertion order, so newest-applied-wins is decided even when two facts about the
+    # same field are written in the same instant
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(), server_default=None)
     entity_type: Mapped[str] = mapped_column(Text)
     entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     field: Mapped[str] = mapped_column(Text)

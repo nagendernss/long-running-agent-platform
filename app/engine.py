@@ -23,7 +23,7 @@ from app.agent_brain import AgentBrain
 from app.channels import CHANNEL_ADDRESS_FIELD, Channel, OutboundMessage
 from app.clock import Clock, parse_duration
 from app.db.facts import get_entity_field
-from app.db.models import Contact, Event, ReviewTask, WorkflowInstance
+from app.db.models import Contact, EntityFactVersion, Event, ReviewTask, WorkflowInstance
 from app.events import idempotency_key_exists, log_event
 from app.review import create_review_task
 from app.scheduling.constraints import apply_scheduling_constraints
@@ -572,11 +572,47 @@ class Engine:
             {"review_task_id": str(task.id), "reason": task.reason, "resolution": resolution, "by": resolved_by}, now=now,
         )
         await self._apply_resolution_channel(session, instance, resolution, review_event.id, now)
+        await self._resolve_proposed_fact(session, instance, task, resolution, now)
         await self._complete_pending_requirement(session, instance, resolution, resolved_by, now)
         await self.definition_for(instance).on_review_resolved(instance, task, self.ctx(session))
         await self._rearm_wake_if_unblocked(session, instance, was_blocked, token_before, now)
         await session.flush()
         return task
+
+    async def _resolve_proposed_fact(
+        self, session: AsyncSession, instance: WorkflowInstance, task: ReviewTask,
+        resolution: dict[str, Any], now: datetime,
+    ) -> None:
+        """A person's verdict on a fact the extraction was not sure enough to apply.
+
+        `apply` is worth exactly what an auto-applied fact is worth: it wins on read
+        from here on, and if it changed how to reach someone it re-arms the chase at
+        once rather than in three days. `reject` closes the row off so it can never
+        win, while leaving it visible - a wrong extraction is evidence too.
+
+        Newest-applied still wins on read, so a better correction that landed while
+        this one sat in the queue keeps its precedence. That is the honest ordering:
+        approving an older guess does not un-learn a newer fact.
+        """
+        action = resolution.get("action")
+        fact_id = (task.context_snapshot or {}).get("fact_id")
+        if action not in ("apply", "reject") or not fact_id:
+            return
+        fact = await session.get(EntityFactVersion, uuid.UUID(str(fact_id)))
+        if fact is None or fact.status != "proposed":
+            return  # already decided, or the snapshot points at nothing
+
+        fact.status = "applied" if action == "apply" else "rejected"
+        await session.flush()
+        await log_event(
+            session, instance.id, f"fact_{fact.status}",
+            {"entity_type": fact.entity_type, "entity_id": str(fact.entity_id), "field": fact.field,
+             "old_value": fact.old_value, "new_value": fact.new_value, "confidence": fact.confidence,
+             "fact_id": str(fact.id), "source": "review"},
+            now=now,
+        )
+        if fact.status == "applied":
+            await self._retry_after_correction(session, instance, fact, now)
 
     async def _rearm_wake_if_unblocked(
         self, session: AsyncSession, instance: WorkflowInstance, was_blocked: bool,
