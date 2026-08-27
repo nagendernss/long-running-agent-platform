@@ -34,6 +34,8 @@ log = logging.getLogger(__name__)
 TASK_NAME = "hc:execute_instance_wakeup"
 RECOVERY_TASK_NAME = "hc:recover_lost_wakes"
 RECOVERY_CRON = "*/5 * * * *"   # cheap: two indexed queries when nothing is wrong
+CALLS_TASK_NAME = "hc:sweep_calls"
+CALLS_CRON = "* * * * *"        # every minute: a queue must drain on its own
 CLEANUP_TASK_NAME = "hc:prune_finished_jobs"
 CLEANUP_CRON = "17 3 * * *"     # nightly, off the hour to avoid every cron firing together
 JOB_RETENTION_HOURS = 24 * 30   # a month of finished jobs is plenty; `event` is the audit trail
@@ -46,6 +48,21 @@ async def execute_instance_wakeup(instance_id: str, wake_token: str) -> None:
 
     result = await get_runtime().engine.run_wakeup(uuid.UUID(instance_id), wake_token)
     log.info("wakeup %s -> %s", instance_id, result)
+
+
+async def sweep_calls(timestamp: int | None = None) -> None:
+    """Keep the phone queue moving. Calls are answered one at a time, so a call nobody
+    picks up has to ring out on its own - otherwise it sits at the front forever and
+    every instance queued behind it is never attempted."""
+    from app.runtime import get_runtime
+    from app.voice.queue import sweep_calls as sweep
+
+    runtime = get_runtime()
+    if runtime.voice is None:
+        return
+    result = await sweep(runtime.session_factory, runtime.clock, runtime.engine)
+    if result.get("timed_out"):
+        log.info("call sweep: %s", result)
 
 
 async def prune_finished_jobs(timestamp: int | None = None) -> None:
@@ -79,6 +96,9 @@ def make_procrastinate_app(psycopg_url: str) -> procrastinate.App:
     app.task(name=TASK_NAME)(execute_instance_wakeup)
     app.periodic(cron=RECOVERY_CRON, queueing_lock="hc:recovery")(
         app.task(name=RECOVERY_TASK_NAME, pass_context=False)(recover_lost_wakes)
+    )
+    app.periodic(cron=CALLS_CRON, queueing_lock="hc:calls")(
+        app.task(name=CALLS_TASK_NAME, pass_context=False)(sweep_calls)
     )
     app.periodic(cron=CLEANUP_CRON, queueing_lock="hc:cleanup")(
         app.task(name=CLEANUP_TASK_NAME, pass_context=False)(prune_finished_jobs)

@@ -25,6 +25,7 @@ from app.clock import OffsetClock, parse_duration
 from app.events import list_events
 from app.review import list_pending_review_tasks
 from app.workflows.types import list_types, upsert_type
+from app.voice.queue import offer_next
 from app.voice.repository import get_call, ringing_calls
 from app.voice.session import VoiceCallSession, miss_call
 from app.runtime import Runtime, build_runtime, ensure_schema, get_runtime
@@ -415,13 +416,30 @@ def call_json(call) -> dict[str, Any]:
         "goal": call.goal,
         "transcript": call.transcript or [],
         "created_at": call.created_at.isoformat() if call.created_at else None,
+        "ringing_since": call.ringing_since.isoformat() if call.ringing_since else None,
         "ended_at": call.ended_at.isoformat() if call.ended_at else None,
     }
 
 
+@app.get("/api/phone")
+async def api_phone(runtime: Runtime = Depends(rt)):
+    """What the phone should be doing: at most one call, plus how many are behind it.
+
+    Several instances can come due at once, but one person answers the phone, so the
+    calls queue rather than all ringing together.
+    """
+    async with runtime.session_factory() as s, s.begin():
+        state = await offer_next(s, runtime.clock)
+        return {
+            "call": call_json(state.offered) if state.offered else None,
+            "waiting": state.waiting,
+            "busy": state.busy,
+        }
+
+
 @app.get("/api/calls")
 async def api_calls(status: str | None = None, s: AsyncSession = Depends(session)):
-    """The phone page polls this to know whether anything is ringing."""
+    """Every call in a state, unfiltered. The phone page uses /api/phone instead."""
     if status == "ringing" or status is None:
         return [call_json(c) for c in await ringing_calls(s)]
     from sqlalchemy import select as _select
@@ -474,11 +492,14 @@ async def call_socket(websocket: WebSocket, call_id: uuid.UUID):
                 break
             if (data := message.get("bytes")) is not None:
                 turn = await call_session.on_utterance(data)
-                await websocket.send_json({"type": "transcript", "who": "contact",
-                                           "text": call_session.transcript[-2]["text"]
-                                           if len(call_session.transcript) >= 2 else ""})
-                await websocket.send_json({"type": "speak", "text": turn.say, "done": turn.done,
-                                           "source": turn.source})
+                await websocket.send_json({
+                    "type": "transcript", "who": "contact", "text": turn.heard,
+                    "stt_ms": turn.stt_ms, "bytes": len(data),
+                })
+                await websocket.send_json({
+                    "type": "speak", "text": turn.say, "done": turn.done,
+                    "source": turn.source, "agent_ms": turn.agent_ms,
+                })
                 if turn.done:
                     await call_session.on_hangup(reason=turn.reason or "agent ended the call")
                     break

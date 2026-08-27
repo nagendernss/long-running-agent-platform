@@ -73,6 +73,11 @@ class CallTurn:
     done: bool = False
     reason: str | None = None
     source: str = "gemini"  # gemini | local | handoff | scripted - useful in the timeline
+    # What the machinery did to produce this, surfaced on the phone page so a bad
+    # transcription or a slow turn is visible rather than mysterious.
+    heard: str = ""
+    stt_ms: int = 0
+    agent_ms: int = 0
 
 
 class CallAgent(Protocol):

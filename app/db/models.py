@@ -124,6 +124,8 @@ class CallRow(Base):
     to_address: Mapped[str | None] = mapped_column(Text)
     transcript: Mapped[list[Any]] = mapped_column(JSONB, default=list)
     created_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    # stamped when this call reaches the front of the queue and starts being offered
+    ringing_since: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     answered_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     ended_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
 

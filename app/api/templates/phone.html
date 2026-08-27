@@ -10,6 +10,7 @@
 {% endif %}
 
 <div id="idle" class="empty">Waiting for a call&hellip; <span class="dim">agents place them when a workflow calls a contact.</span></div>
+<p class="dim hint" id="queue" hidden></p>
 
 <section id="incoming" class="phone-card" hidden>
   <div class="phone-ring">
@@ -42,7 +43,7 @@
     <label class="radio"><input type="checkbox" id="auto" checked> send when I stop speaking</label>
     <button id="hangup">Hang up</button>
   </div>
-  <p class="dim hint" id="hint">Speak normally. What you say is transcribed here; the agent replies out loud.</p>
+  <p class="dim hint" id="hint">Speak normally. Each turn shows what speech recognition heard and how long each step took.</p>
 </section>
 
 <style>
@@ -62,6 +63,11 @@
   .said.agent { border-left-color:var(--accent); align-self:flex-start; }
   .said.contact { border-left-color:var(--active); align-self:flex-end; }
   .said .dim { font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; }
+  .said .meta { display:flex; flex-wrap:wrap; gap:5px; margin-top:5px; }
+  .said .tag { font-family:ui-monospace,Consolas,monospace; font-size:10px; color:var(--dim);
+               border:1px solid var(--line); border-radius:999px; padding:0 6px; }
+  #live-state.speaking { color:var(--accent); }
+  #live-state.listening { color:var(--active); }
   #talk.recording { border-color:var(--active); color:var(--active); }
 </style>
 
@@ -84,12 +90,28 @@
 
   const show = (el, on) => el.hidden = !on;
 
-  function say(who, text) {
+  // Each bubble carries what the machine did, not just the words: which model
+  // answered, and how long the transcription and the thinking took.
+  function say(who, text, tags = []) {
     if (!text) return;
     const div = document.createElement('div');
     div.className = `said ${who}`;
-    div.innerHTML = `<div class="dim">${who === 'agent' ? 'agent' : 'you'}</div>`;
+    const label = document.createElement('div');
+    label.className = 'dim';
+    label.textContent = who === 'agent' ? 'agent → speaking' : 'you → heard';
+    div.appendChild(label);
     div.appendChild(document.createTextNode(text));
+    if (tags.filter(Boolean).length) {
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      for (const tag of tags.filter(Boolean)) {
+        const span = document.createElement('span');
+        span.className = 'tag';
+        span.textContent = tag;
+        meta.appendChild(span);
+      }
+      div.appendChild(meta);
+    }
     conversation.appendChild(div);
     conversation.scrollTop = conversation.scrollHeight;
   }
@@ -97,10 +119,19 @@
   // ---- ringing ------------------------------------------------------------------
   async function poll() {
     if (socket) return;
+    let waiting = 0, busy = false;
     try {
-      const calls = await (await fetch('/api/calls?status=ringing')).json();
-      current = calls[0] || null;
+      const state = await (await fetch('/api/phone')).json();
+      current = state.call || null;
+      waiting = state.waiting || 0;
+      busy = state.busy;
     } catch { current = null; }
+
+    const queue = document.getElementById('queue');
+    queue.hidden = !waiting;
+    queue.textContent = waiting
+      ? `${waiting} more call${waiting === 1 ? '' : 's'} queued - they ring one at a time.`
+      : '';
     show(incoming, !!current);
     show(idle, !current);
     if (current) {
@@ -138,8 +169,16 @@
     socket.onopen = () => { socket.send(JSON.stringify({ type: 'answer' })); liveState.textContent = 'connected'; };
     socket.onmessage = (event) => {
       const msg = JSON.parse(event.data);
-      if (msg.type === 'transcript' && msg.who === 'contact') say('contact', msg.text);
-      if (msg.type === 'speak') { say('agent', msg.text); speak(msg.text, msg.done); }
+      if (msg.type === 'transcript' && msg.who === 'contact') {
+        const kb = msg.bytes ? `${Math.round(msg.bytes / 1024)} kB audio` : '';
+        say('contact', msg.text || '(nothing intelligible)', [`whisper ${(msg.stt_ms / 1000).toFixed(1)}s`, kb]);
+      }
+      if (msg.type === 'speak') {
+        const how = msg.source && msg.source !== 'opening' ? msg.source : '';
+        const took = msg.agent_ms ? `${(msg.agent_ms / 1000).toFixed(1)}s` : '';
+        say('agent', msg.text, [how, took].filter(Boolean).length ? [`${how} ${took}`.trim()] : []);
+        speak(msg.text, msg.done);
+      }
       if (msg.type === 'error') { liveState.textContent = msg.text; }
     };
     socket.onclose = () => endCall();
@@ -164,9 +203,16 @@
   // The agent speaks with the voices already installed on this machine.
   function speak(text, done) {
     speaking = true;
+    liveState.textContent = 'speaking';
+    liveState.className = 'dim mono speaking';
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = 1.05;
-    utterance.onend = () => { speaking = false; if (done) endCall(); };
+    utterance.onend = () => {
+      speaking = false;
+      liveState.textContent = auto.checked ? 'listening' : 'ready';
+      liveState.className = 'dim mono';
+      if (done) endCall();
+    };
     utterance.onerror = () => { speaking = false; };
     speechSynthesis.speak(utterance);
   }
@@ -199,6 +245,7 @@
     if (!recorder || recorder.state === 'recording' || speaking) return setTimeout(startTurn, 250);
     recorder.start();
     liveState.textContent = 'listening';
+    liveState.className = 'dim mono listening';
     talk.classList.add('recording');
   }
 

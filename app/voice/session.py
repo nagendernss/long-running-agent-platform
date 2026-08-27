@@ -12,6 +12,7 @@ needed to change to support voice.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -66,22 +67,29 @@ class VoiceCallSession:
         return self.opening
 
     async def on_utterance(self, audio: bytes, mime: str = "audio/webm") -> CallTurn:
-        """They said something. Returns what to say back."""
+        """They said something. Returns what to say back, with the timings that
+        produced it - a slow turn or a bad transcription should be visible."""
+        started = time.perf_counter()
         heard = (await self.stt.transcribe(audio, mime)).strip()
+        stt_ms = int((time.perf_counter() - started) * 1000)
         if not heard:
             self._unintelligible += 1
             if self._unintelligible >= MAX_UNINTELLIGIBLE:
                 return CallTurn(
                     say="I'm having trouble hearing you - I'll have someone call you back.",
-                    done=True, reason="could not hear", source="handoff",
+                    done=True, reason="could not hear", source="handoff", stt_ms=stt_ms,
                 )
             # Deliberately not sent to the agent: it would have to invent a reply to
             # silence, and inventing is exactly what we do not want on a call.
-            return CallTurn(say=DID_NOT_CATCH, done=False, source="handoff")
+            return CallTurn(say=DID_NOT_CATCH, done=False, source="handoff", stt_ms=stt_ms)
 
         self._unintelligible = 0
         await self._record("contact", heard)
+
+        thinking = time.perf_counter()
         turn = await self.agent.next_turn(self.goal, self.opening, self.transcript)
+        turn.heard, turn.stt_ms = heard, stt_ms
+        turn.agent_ms = int((time.perf_counter() - thinking) * 1000)
         await self._record("agent", turn.say, source=turn.source)
         return turn
 
