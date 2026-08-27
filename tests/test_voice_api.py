@@ -197,3 +197,12 @@ async def test_a_call_reads_as_a_conversation_in_the_timeline(client, rt, seed):
     body = (await client.get(f"/api/calls/{call_id}")).json()
     assert [t["who"] for t in body["transcript"]] == ["agent", "contact", "agent"]
     assert "forty five dollar" in body["transcript"][1]["text"]
+
+
+async def test_the_phone_page_speaks_numbers_digit_by_digit_and_finishes_talking(client):
+    """Two things a browser gets wrong on its own: speechSynthesis reads 911356 as a
+    quantity, and the server closing the socket after the last turn would cut the
+    goodbye off halfway through."""
+    page = (await client.get("/phone")).text
+    assert "function speakable" in page and "\d{4,}" in page, "long digit runs are spaced out"
+    assert "if (speaking) { pendingEnd = true; return; }" in page, "teardown waits for the sentence"

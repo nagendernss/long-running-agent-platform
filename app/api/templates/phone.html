@@ -87,6 +87,7 @@
   let stream = null;
   let chunks = [];
   let speaking = false;    // the agent is talking: do not record it
+  let pendingEnd = false;  // the line closed while it was still talking
   let muted = false;
   let audioCtx = null;
 
@@ -172,6 +173,7 @@
     show(incoming, false); show(idle, false); show(live, true);
     conversation.replaceChildren();
     muted = false;
+    pendingEnd = false;
     muteButton.textContent = 'Mute';
     muteButton.classList.remove('on');
 
@@ -216,7 +218,10 @@
     }
   };
 
+  // The server closes the socket as soon as the agent's last turn is sent, so a plain
+  // teardown would cancel the goodbye halfway through. Finish speaking first.
   function endCall() {
+    if (speaking) { pendingEnd = true; return; }
     if (recorder && recorder.state !== 'inactive') recorder.stop();
     recorder = null;
     if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
@@ -226,19 +231,32 @@
     current = null;
   }
 
+  // A reference or phone number is a sequence of digits, not a quantity: left alone,
+  // speechSynthesis reads 911356 as "nine hundred eleven thousand...". Runs of four or
+  // more are spaced out so they are spoken digit by digit. Shorter runs - a $45 fee, a
+  // date - are quantities and are left as written. Only what is *spoken* changes; the
+  // transcript keeps the real text.
+  function speakable(text) {
+    return text.replace(/\d{4,}/g, (run) => run.split('').join(' '));
+  }
+
   // The agent speaks with the voices already installed on this machine.
   function speak(text, done) {
     speaking = true;
     setState('speaking', 'speaking');
-    const utterance = new SpeechSynthesisUtterance(text);
+    const utterance = new SpeechSynthesisUtterance(speakable(text));
     utterance.rate = 1.05;
     utterance.onend = () => {
       speaking = false;
-      if (done) return endCall();
+      if (done || pendingEnd) { pendingEnd = false; return endCall(); }
       setState(muted ? 'muted - they cannot hear you' : 'listening', muted ? 'muted' : 'listening');
       startTurn();
     };
-    utterance.onerror = () => { speaking = false; startTurn(); };
+    utterance.onerror = () => {
+      speaking = false;
+      if (pendingEnd) { pendingEnd = false; return endCall(); }
+      startTurn();
+    };
     speechSynthesis.speak(utterance);
   }
 
