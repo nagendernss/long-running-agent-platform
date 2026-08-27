@@ -80,6 +80,25 @@ def node_for(event: Event) -> Node | None:
     if t == "attempt_started":
         return None
 
+    if t == "call_placed":
+        return Node("out", "accent", "☎", "Called", p.get("to", ""), [p.get("goal_summary", "")] if p.get("goal_summary") else [], event.created_at, p)
+
+    if t == "call_answered":
+        return Node("engine", "reply", "✓", "They answered", "", [], event.created_at, p)
+
+    if t == "call_missed":
+        return Node("engine", "muted", "⊘", "Nobody answered", p.get("reason", ""), [], event.created_at, p)
+
+    if t == "call_ended":
+        turns = p.get("turns")
+        return Node(
+            "engine", "muted", "•", "Call ended", p.get("reason", ""),
+            [f"{turns} turns"] if turns else [], event.created_at, p,
+        )
+
+    if t == "call_failed":
+        return Node("engine", "alert", "!", "The call failed", p.get("reason", ""), [], event.created_at, p)
+
     if t == "instance_created":
         return Node("engine", "muted", "◆", "Instance created", p.get("workflow_type", ""), at=event.created_at, payload=p)
 

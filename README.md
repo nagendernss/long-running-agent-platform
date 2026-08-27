@@ -330,6 +330,43 @@ wakes, fact write-back, channel switching, the review queue, the API and the das
 
 ---
 
+## Voice calls
+
+The `call` channel places a real call. A browser window rings, a person answers and
+speaks, their speech is transcribed locally, and the agent talks back using the voices
+already installed on the machine.
+
+```bash
+python scripts/serve.py --embedded --fresh --voice   # then open /phone in a second window
+```
+
+Everything except the language model runs locally:
+
+| Piece | What | Measured here |
+|---|---|---|
+| Speech to text | `faster-whisper` `small.en` | loads in 15.6s once; ~1.8s per utterance |
+| Speech out | the browser's `speechSynthesis` (Windows voices) | no model, no server audio path |
+| The conversation | Gemini, keys rotating on quota | 1-3s per turn |
+| If Gemini is gone | Ollama `llama3.2:3b` | 0.4s per turn warm |
+
+So about **3-5 seconds per turn**. Noticeable, not broken.
+
+**A call is still one attempt.** `ctx.send(channel="call")` places it and returns,
+because a call lasts minutes and an engine transaction must not. The conversation runs
+outside that transaction and its transcript goes through `handle_inbound` exactly as a
+typed reply does - which is why supporting voice needed no change to the engine, and
+why an unanswered call reaches the existing retry ladder rather than a new code path.
+
+Both prompts are told the text is a machine's guess at speech rather than something
+typed: the agent asks for a spelling instead of repeating a mishearing back, and the
+extraction prompt normalises spoken numbers, distrusts garbled names, and is stricter
+about confidence so a possibly-misheard value gets confirmed by a person.
+
+When Gemini is unreachable the call degrades - second key, then the local model, then
+a line saying someone will call back - rather than leaving dead air. Silence is never
+sent to the model at all: inventing a reply to nothing is the one thing that must not
+happen on a call.
+
 ## Operating it
 
 `scripts/worker.py` is the production process: it executes wakes and hosts two periodic

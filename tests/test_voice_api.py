@@ -166,3 +166,25 @@ async def test_the_socket_says_so_when_voice_is_off(rt, seed):
 
     assert socket.sent[0]["type"] == "error" and "not enabled" in socket.sent[0]["text"]
     assert socket.closed
+
+
+async def test_a_call_reads_as_a_conversation_in_the_timeline(client, rt, seed):
+    """A call is the most interesting thing that happens to an instance; it should not
+    read as three opaque event rows."""
+    from app.api.main import call_socket
+
+    iid, call_id = await place(rt, seed)
+    rt.voice = VoiceStack(
+        stt=ScriptedSTT(["There is a forty five dollar fee."]),
+        agent=ScriptedCallAgent(["Understood, who do we make it out to?"]),
+    )
+    socket = FakeSocket([{"type": "answer"}, b"audio", {"type": "hangup"}])
+    await call_socket(socket, __import__("uuid").UUID(call_id))
+
+    page = (await client.get(f"/instances/{iid}")).text
+    assert "Called" in page and seed.provider_phone in page
+    assert "They answered" in page and "Call ended" in page
+
+    body = (await client.get(f"/api/calls/{call_id}")).json()
+    assert [t["who"] for t in body["transcript"]] == ["agent", "contact", "agent"]
+    assert "forty five dollar" in body["transcript"][1]["text"]

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.channels.base import Channel, OutboundMessage
 from app.clock import Clock
+from app.events import log_event
 from app.voice.repository import live_call_for_instance, place_call
 
 log = logging.getLogger(__name__)
@@ -76,6 +77,12 @@ class VoiceChannel:
             goal=goal,
             opening=message.body,
             to_address=message.address,
+            now=self.clock.now(),
+        )
+        await log_event(
+            session, message.instance_id, "call_placed",
+            {"call_id": str(call.id), "to": message.address,
+             "goal_summary": goal.splitlines()[0] if goal else ""},
             now=self.clock.now(),
         )
         log.info("placed call %s to %s", call.id, message.address)
