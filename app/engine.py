@@ -178,7 +178,9 @@ class Engine:
         cid = instance.context.get("target_contact_id")
         return await session.get(Contact, _uuid(cid)) if cid else None
 
-    async def _brain_context(self, session: AsyncSession, instance: WorkflowInstance) -> dict[str, Any]:
+    async def _brain_context(
+        self, session: AsyncSession, instance: WorkflowInstance, channel: str = "sms"
+    ) -> dict[str, Any]:
         """What the brain is told about the conversation it is reading.
 
         Who is speaking changes what the words mean: "the pain is worse" from a client
@@ -194,6 +196,7 @@ class Engine:
             "target_contact_id": instance.context.get("target_contact_id"),
             "target_contact_name": contact.name if contact else None,
             "target_contact_role": contact.role if contact else None,
+            "channel": channel,
         }
 
     # -- lifecycle -----------------------------------------------------------------
@@ -334,7 +337,9 @@ class Engine:
             await log_event(session, instance.id, "inbound_ignored", {"text": text, "reason": "completed"}, now=now)
             return []
         inbound = await log_event(session, instance.id, "inbound_received", {"text": text, "channel": channel}, now=now)
-        signals = await self.brain.extract_signals(text, await self._brain_context(session, instance))
+        signals = await self.brain.extract_signals(
+            text, await self._brain_context(session, instance, channel)
+        )
         if not signals:
             signals = [NeedsHuman(reason="unrecognized_reply", suggested_options=["read transcript"], evidence=text)]
         await log_event(

@@ -162,3 +162,15 @@ async def test_live_agent_answers_a_records_desk():
     turn = await live.next_turn(GOAL, OPENING, TRANSCRIPT)
     assert turn.say and len(turn.say) < 300, f"got {turn.say!r}"
     assert turn.source == "gemini"
+
+
+def test_the_agent_is_told_it_is_reading_a_transcription():
+    """On a live call it never sees words, only a machine's guess at them - so it must
+    verify anything it was sent to collect rather than repeat a mishearing back."""
+    from app.voice.agent import SYSTEM
+
+    system = SYSTEM.format(goal=GOAL, opening=OPENING)
+    assert "speech recognition's guess" in system
+    assert "spell it out" in system, "for anything that has to be exact"
+    assert "did not catch it rather than guessing" in system
+    assert "wrong facts on a client's file" in system, "the reason it matters"

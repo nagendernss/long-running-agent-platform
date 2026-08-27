@@ -36,6 +36,14 @@ def rule(name: str, pattern: str, build: Callable[..., Signal | None]) -> Keywor
 PHONE_RE = re.compile(r"(?<!\d)(\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\d{3}[\s.-]\d{4})(?!\d)")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 AMOUNT_RE = re.compile(r"[$£€]\s?\d+(?:[.,]\d{2})?")
+# Speech never contains a currency symbol. A transcript says "forty five dollars" or
+# "45 dollars", so money has to be recognised in the form people actually say it.
+SPOKEN_AMOUNT_RE = re.compile(
+    r"\b((?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|"
+    r"fifty|sixty|seventy|eighty|ninety|hundred)(?:[\s-](?:\d+|one|two|three|four|five|six|seven|eight|"
+    r"nine|ten|hundred|fifty))*)\s+(dollars?|pounds?|euros?)\b",
+    re.IGNORECASE,
+)
 URL_RE = re.compile(r"\b(?:https?://)?(?:[\w-]+\.)+(?:com|org|net|gov|edu|example)(?:/\S*)?", re.IGNORECASE)
 
 
@@ -79,7 +87,7 @@ def _entity_update_email(m: re.Match[str], text: str, ctx: dict[str, Any]) -> Si
 
 
 def _payment_required(m: re.Match[str], text: str, ctx: dict[str, Any]) -> Signal | None:
-    amount = AMOUNT_RE.search(text)
+    amount = AMOUNT_RE.search(text) or SPOKEN_AMOUNT_RE.search(text)
     url = URL_RE.search(text)
     details = {k: v for k, v in {"amount": amount.group(0) if amount else None,
                                  "url": url.group(0) if url else None}.items() if v}
@@ -130,7 +138,13 @@ def _reschedule(m: re.Match[str], text: str, ctx: dict[str, Any]) -> Signal | No
 GENERIC_RULES: list[KeywordRule] = [
     rule(
         "payment_required",
-        r"\b((records|processing|copying|retrieval) fee|there is a fee|fee of|invoice|prepayment|payment (is )?(required|due)|pay(ment)? (before|first)|mail a check)\b",
+        # Typed forms, plus the ones a transcript produces: speech has no currency
+        # symbol, so "a forty five dollar fee" and "that will be 45 dollars" must match.
+        r"\b((records|processing|copying|retrieval) fee"
+        r"|there(?: i|')s an? [\w\s-]{0,20}?fee"
+        r"|fee of|[\w-]+ dollar fee|charge of"
+        r"|(will be|costs?|comes to) \$?[\w-]+ (dollars?|pounds?|euros?)"
+        r"|invoice|prepayment|payment (is )?(required|due)|pay(ment)? (before|first)|mail a check)\b",
         _payment_required,
     ),
     rule(

@@ -381,3 +381,21 @@ async def test_a_server_error_is_retried_on_the_same_key_not_rotated():
     brain.api_keys = ("a", "b")
     assert [s.type for s in await brain.extract_signals("no answer", CTX)] == ["NO_ANSWER"]
     assert calls == ["a", "a"], "same key, retried"
+
+
+# ---------------------------------------------------------------- speech is a guess
+def test_a_call_transcript_is_labelled_as_machine_heard():
+    """It is speech recognition's guess, not a quote. The model must be told, or it
+    reads garbled names and homophones as literal facts."""
+    brain = stub_brain(lambda r: gemini_reply([]))
+    prompt = brain._prompt({**CTX, "channel": "call"}, brain.signal_classes("medical_records_followup"))
+    assert "speech recognition" in prompt
+    assert "forty five dollars" in prompt, "spoken numbers must be normalised"
+    assert "homophones" in prompt
+    assert "below 0.85" in prompt, "and it should be less sure than with typed text"
+
+
+def test_a_typed_message_is_still_read_literally():
+    brain = stub_brain(lambda r: gemini_reply([]))
+    prompt = brain._prompt({**CTX, "channel": "sms"}, brain.signal_classes("medical_records_followup"))
+    assert "Read it literally" in prompt and "speech recognition" not in prompt

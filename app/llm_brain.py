@@ -66,6 +66,7 @@ PROMPT = """You read one inbound message or call transcript for a law firm's aut
 Workflow: {workflow_type}
 Current state: {state}
 Who replied: {target_description} (contact id {target_contact_id})
+How it arrived: {source_note}
 Instance context: {context}
 
 Emit every signal the message supports - a message can carry more than one (for example a corrected phone number AND a request to call back later). Emit none only if the message truly says nothing actionable.
@@ -96,6 +97,21 @@ DETAIL_PROPERTIES: dict[str, Any] = {
     "reference": {"type": "string"},
     "notes": {"type": "string"},
 }
+
+
+TYPED_SOURCE = "A message they typed. Read it literally."
+
+SPOKEN_SOURCE = """A live call, transcribed by speech recognition. This is a machine's guess at what was said, not a quote, so:
+- numbers arrive as words ("forty five dollars" is $45, "five five five oh one double nine" is a phone number) - normalise them
+- names, streets and companies are often mangled; do not write a garbled one into a fact
+- punctuation is missing and sentences run together; a single line may hold several separate points
+- homophones are common ("fax"/"facts", "no"/"know", "male"/"mail")
+- only the other party's words are here; the agent's own turns have been removed
+Be stricter about confidence than you would with typed text: if a value could have been misheard, put it below 0.85 so a person confirms it rather than it being applied silently. If the transcript is empty or unintelligible, that is a NO_ANSWER, not a reason to invent something."""
+
+
+def _source_note(channel: str) -> str:
+    return SPOKEN_SOURCE if channel == "call" else TYPED_SOURCE
 
 
 def _describe_target(workflow_context: dict[str, Any]) -> str:
@@ -239,6 +255,7 @@ class GeminiAgentBrain:
             lines.append("")
             lines.append(f"This workflow adds: {notes}")
         return PROMPT.format(
+            source_note=_source_note(workflow_context.get("channel", "sms")),
             workflow_type=workflow_context.get("workflow_type", "unknown"),
             state=workflow_context.get("state", "unknown"),
             target_description=_describe_target(workflow_context),
