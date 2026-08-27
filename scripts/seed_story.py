@@ -150,50 +150,96 @@ async def seed_story(settings: Settings | None = None) -> None:
         await rt.close()
 
 
-async def seed_fresh(settings: Settings | None = None) -> None:
-    """Day zero: one instance per registered workflow, started just now, no history.
+# The demo set: one instance per workflow, and what each one needs to run.
+DEMO_FLOWS = ("medical_records_followup", "client_checkin", "contact_update")
 
-    Each opens on its first attempt with a response deadline armed, so the header's
-    "skip to next wake" walks them forward through the retry ladder from the start.
+
+async def _demo_cast(session, now):
+    """The three contacts and the case, created once and reused on every later start.
+
+    Matched by name rather than tracked by id, because the point is that restarting the
+    server twice does not leave six Jane Okafors behind.
+    """
+    people = {}
+    wanted = [
+        dict(name="Jane Okafor", role="client", phone="+15550001", email="jane@example.com"),
+        dict(name="Mercy Hospital Records", role="provider", phone="+15550100",
+             email="records@mercy.example", timezone="America/Chicago",
+             business_hours={"start": "08:00", "end": "16:00"}),
+        dict(name="County Clerk", role="staff", phone="+15550300", email="clerk@county.example"),
+    ]
+    for spec in wanted:
+        existing = (await session.execute(
+            select(Contact).where(Contact.name == spec["name"]).limit(1)
+        )).scalar_one_or_none()
+        if existing is None:
+            existing = Contact(id=uuid.uuid4(), created_at=now, **spec)
+            session.add(existing)
+        people[spec["role"]] = existing
+    await session.flush()
+
+    case = (await session.execute(
+        select(CaseRecord).where(CaseRecord.client_contact_id == people["client"].id).limit(1)
+    )).scalar_one_or_none()
+    if case is None:
+        case = CaseRecord(id=uuid.uuid4(), client_contact_id=people["client"].id,
+                          matter_type="personal_injury", created_at=now)
+        session.add(case)
+        await session.flush()
+    return people, case
+
+
+def _demo_context(workflow_type: str, people, case) -> dict:
+    client, provider, clerk = people["client"], people["provider"], people["staff"]
+    return {
+        "medical_records_followup": {
+            "target_contact_id": str(provider.id), "provider_contact_id": str(provider.id),
+            "client_contact_id": str(client.id), "provider_channel": "call", "client_channel": "sms",
+        },
+        "client_checkin": {
+            "target_contact_id": str(client.id), "client_contact_id": str(client.id),
+            "client_channel": "sms",
+        },
+        "contact_update": {
+            "target_contact_id": str(clerk.id), "channel": "email",
+            "message": "Confirming the filing deadline for the Okafor matter is March 3rd.",
+        },
+    }[workflow_type]
+
+
+async def seed_fresh(settings: Settings | None = None) -> None:
+    """Day zero: one *active* instance per demo workflow, started just now, no history.
+
+    Tops up rather than refusing to run. It used to skip entirely if the database held
+    any instance at all, which meant that once one of them completed - a reviewer
+    closing it, a chase that ended - restarting could never get that flow back, and the
+    dashboard opened on two live agents and a corpse. Now a workflow with no active
+    instance gets a new one at its first attempt, and whatever already ran stays where
+    it is: finished instances are history, not clutter to be cleaned up.
+
+    Each new instance opens on its first attempt with a response deadline armed, so the
+    header's "skip to next wake" walks it forward through the retry ladder from the start.
     """
     from app.channels import MockChannel
 
     rt = await build_runtime(settings or get_settings(), channel=MockChannel())
     try:
         async with rt.session_factory() as s, s.begin():
-            if (await s.execute(select(WorkflowInstance.id).limit(1))).scalar_one_or_none():
-                print("database already has instances; skipping seed")
-                return
             now = rt.clock.now()
-            client = Contact(id=uuid.uuid4(), name="Jane Okafor", role="client", phone="+15550001",
-                             email="jane@example.com", created_at=now)
-            provider = Contact(id=uuid.uuid4(), name="Mercy Hospital Records", role="provider",
-                               phone="+15550100", email="records@mercy.example", timezone="America/Chicago",
-                               business_hours={"start": "08:00", "end": "16:00"}, created_at=now)
-            clerk = Contact(id=uuid.uuid4(), name="County Clerk", role="staff", phone="+15550300",
-                            email="clerk@county.example", created_at=now)
-            s.add_all([client, provider, clerk])
-            await s.flush()
-            case = CaseRecord(id=uuid.uuid4(), client_contact_id=client.id,
-                              matter_type="personal_injury", created_at=now)
-            s.add(case)
-            await s.flush()
+            live = set((await s.execute(
+                select(WorkflowInstance.workflow_type).where(WorkflowInstance.status != "completed")
+            )).scalars().all())
+            missing = [wf for wf in DEMO_FLOWS if wf not in live]
+            if not missing:
+                print(f"{len(DEMO_FLOWS)} flows already running; nothing to start")
+                return
 
-            await rt.engine.start_instance(
-                s, "medical_records_followup", case_id=case.id,
-                context={"target_contact_id": str(provider.id), "provider_contact_id": str(provider.id),
-                         "client_contact_id": str(client.id), "provider_channel": "call", "client_channel": "sms"},
-            )
-            await rt.engine.start_instance(
-                s, "client_checkin", case_id=case.id,
-                context={"target_contact_id": str(client.id), "client_contact_id": str(client.id),
-                         "client_channel": "sms"},
-            )
-            await rt.engine.start_instance(
-                s, "contact_update", case_id=case.id,
-                context={"target_contact_id": str(clerk.id), "channel": "email",
-                         "message": "Confirming the filing deadline for the Okafor matter is March 3rd."},
-            )
-        print("seeded 3 instances at day zero")
+            people, case = await _demo_cast(s, now)
+            for workflow_type in missing:
+                await rt.engine.start_instance(
+                    s, workflow_type, case_id=case.id, context=_demo_context(workflow_type, people, case)
+                )
+        started = ", ".join(missing)
+        print(f"started {len(missing)} instance(s) at day zero: {started}")
     finally:
         await rt.close()

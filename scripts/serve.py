@@ -3,8 +3,9 @@
     python scripts/serve.py                       # uses DATABASE_URL from .env
     python scripts/serve.py --embedded --seed             # embedded Postgres + a demo story
     python scripts/serve.py --embedded --reset --seed     # flush first, then replay the story
-    python scripts/serve.py --embedded --reset --fresh    # flush, then start every workflow at day zero
-    python scripts/serve.py --embedded --fresh --voice    # real calls, answered at /phone
+    python scripts/serve.py --embedded --fresh            # three running agents, every start
+    python scripts/serve.py --embedded --fresh --voice    # the same, with real calls at /phone
+    python scripts/serve.py --embedded --reset --fresh    # flush the history first
 
 Why not plain `uvicorn app.api.main:app`? On Windows uvicorn installs a
 ProactorEventLoop, and psycopg (used by Procrastinate) refuses to run async on it.
@@ -39,7 +40,8 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--embedded", action="store_true", help="start a bundled Postgres instead of using DATABASE_URL")
     ap.add_argument("--seed", action="store_true", help="replay a 26-day demo story if the database is empty")
-    ap.add_argument("--fresh", action="store_true", help="start one instance per workflow at day zero")
+    ap.add_argument("--fresh", action="store_true",
+                    help="top up to one running instance per demo workflow (safe on every start)")
     ap.add_argument("--reset", action="store_true", help="delete every row first (the schema is kept)")
     ap.add_argument("--voice", action="store_true",
                     help="place real calls, answered at /phone (loads a local speech model)")
