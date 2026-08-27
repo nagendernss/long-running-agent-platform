@@ -39,11 +39,11 @@
   <div id="conversation" class="conversation"></div>
 
   <div class="row">
-    <button id="talk">Hold to talk</button>
-    <label class="radio"><input type="checkbox" id="auto" checked> send when I stop speaking</label>
+    <button id="mute">Mute</button>
     <button id="hangup">Hang up</button>
   </div>
-  <p class="dim hint" id="hint">Speak normally. Each turn shows what speech recognition heard and how long each step took.</p>
+  <p class="dim hint">Just talk &mdash; your turn is sent when you stop speaking. Each turn shows
+     what speech recognition heard and how long each step took.</p>
 </section>
 
 <style>
@@ -68,7 +68,8 @@
                border:1px solid var(--line); border-radius:999px; padding:0 6px; }
   #live-state.speaking { color:var(--accent); }
   #live-state.listening { color:var(--active); }
-  #talk.recording { border-color:var(--active); color:var(--active); }
+  #live-state.muted { color:var(--blocked); }
+  #mute.on { border-color:var(--blocked); color:var(--blocked); }
 </style>
 
 <script>
@@ -78,17 +79,23 @@
   const live = document.getElementById('live');
   const conversation = document.getElementById('conversation');
   const liveState = document.getElementById('live-state');
-  const talk = document.getElementById('talk');
-  const auto = document.getElementById('auto');
+  const muteButton = document.getElementById('mute');
 
-  let current = null;      // the ringing call
+  let current = null;      // the call being offered
   let socket = null;
   let recorder = null;
+  let stream = null;
   let chunks = [];
   let speaking = false;    // the agent is talking: do not record it
+  let muted = false;
   let audioCtx = null;
 
   const show = (el, on) => el.hidden = !on;
+
+  function setState(text, kind = '') {
+    liveState.textContent = text;
+    liveState.className = `dim mono ${kind}`;
+  }
 
   // Each bubble carries what the machine did, not just the words: which model
   // answered, and how long the transcription and the thinking took.
@@ -101,10 +108,11 @@
     label.textContent = who === 'agent' ? 'agent → speaking' : 'you → heard';
     div.appendChild(label);
     div.appendChild(document.createTextNode(text));
-    if (tags.filter(Boolean).length) {
+    const shown = tags.filter(Boolean);
+    if (shown.length) {
       const meta = document.createElement('div');
       meta.className = 'meta';
-      for (const tag of tags.filter(Boolean)) {
+      for (const tag of shown) {
         const span = document.createElement('span');
         span.className = 'tag';
         span.textContent = tag;
@@ -119,12 +127,11 @@
   // ---- ringing ------------------------------------------------------------------
   async function poll() {
     if (socket) return;
-    let waiting = 0, busy = false;
+    let waiting = 0;
     try {
       const state = await (await fetch('/api/phone')).json();
       current = state.call || null;
       waiting = state.waiting || 0;
-      busy = state.busy;
     } catch { current = null; }
 
     const queue = document.getElementById('queue');
@@ -164,9 +171,12 @@
     const callId = current.id;
     show(incoming, false); show(idle, false); show(live, true);
     conversation.replaceChildren();
+    muted = false;
+    muteButton.textContent = 'Mute';
+    muteButton.classList.remove('on');
 
     socket = new WebSocket(`ws://${location.host}/ws/call/${callId}`);
-    socket.onopen = () => { socket.send(JSON.stringify({ type: 'answer' })); liveState.textContent = 'connected'; };
+    socket.onopen = () => { socket.send(JSON.stringify({ type: 'answer' })); setState('connected'); };
     socket.onmessage = (event) => {
       const msg = JSON.parse(event.data);
       if (msg.type === 'transcript' && msg.who === 'contact') {
@@ -176,10 +186,10 @@
       if (msg.type === 'speak') {
         const how = msg.source && msg.source !== 'opening' ? msg.source : '';
         const took = msg.agent_ms ? `${(msg.agent_ms / 1000).toFixed(1)}s` : '';
-        say('agent', msg.text, [how, took].filter(Boolean).length ? [`${how} ${took}`.trim()] : []);
+        say('agent', msg.text, [`${how} ${took}`.trim()]);
         speak(msg.text, msg.done);
       }
-      if (msg.type === 'error') { liveState.textContent = msg.text; }
+      if (msg.type === 'error') setState(msg.text);
     };
     socket.onclose = () => endCall();
 
@@ -191,9 +201,25 @@
     endCall();
   };
 
+  // Mute is the only control during a call: everything else is automatic.
+  muteButton.onclick = () => {
+    muted = !muted;
+    muteButton.textContent = muted ? 'Unmute' : 'Mute';
+    muteButton.classList.toggle('on', muted);
+    if (stream) stream.getAudioTracks().forEach((t) => (t.enabled = !muted));
+    if (muted) {
+      discardTurn();
+      setState('muted - they cannot hear you', 'muted');
+    } else {
+      setState('listening', 'listening');
+      startTurn();
+    }
+  };
+
   function endCall() {
     if (recorder && recorder.state !== 'inactive') recorder.stop();
     recorder = null;
+    if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
     if (socket) { try { socket.close(); } catch {} socket = null; }
     speechSynthesis.cancel();
     show(live, false); show(idle, true);
@@ -203,27 +229,25 @@
   // The agent speaks with the voices already installed on this machine.
   function speak(text, done) {
     speaking = true;
-    liveState.textContent = 'speaking';
-    liveState.className = 'dim mono speaking';
+    setState('speaking', 'speaking');
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = 1.05;
     utterance.onend = () => {
       speaking = false;
-      liveState.textContent = auto.checked ? 'listening' : 'ready';
-      liveState.className = 'dim mono';
-      if (done) endCall();
+      if (done) return endCall();
+      setState(muted ? 'muted - they cannot hear you' : 'listening', muted ? 'muted' : 'listening');
+      startTurn();
     };
-    utterance.onerror = () => { speaking = false; };
+    utterance.onerror = () => { speaking = false; startTurn(); };
     speechSynthesis.speak(utterance);
   }
 
   // ---- listening ----------------------------------------------------------------
   async function startMic() {
-    let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch {
-      liveState.textContent = 'no microphone - use hold to talk on another device';
+      setState('no microphone - allow access and answer the next call');
       return;
     }
     recorder = new MediaRecorder(stream);
@@ -231,31 +255,36 @@
     recorder.onstop = () => {
       const blob = new Blob(chunks, { type: 'audio/webm' });
       chunks = [];
+      if (!sendNext) { sendNext = true; return; }        // discarded, e.g. muted mid-turn
       if (blob.size > 2000 && socket && socket.readyState === WebSocket.OPEN) {
-        liveState.textContent = 'thinking...';
+        setState('thinking...');
         blob.arrayBuffer().then((buf) => socket.send(buf));
+      } else {
+        startTurn();                                      // too short to be speech
       }
-      if (auto.checked && socket) startTurn();
     };
-    watchLevel(stream);
-    if (auto.checked) startTurn();
+    watchLevel();
+    startTurn();
   }
 
+  let sendNext = true;
+
   function startTurn() {
-    if (!recorder || recorder.state === 'recording' || speaking) return setTimeout(startTurn, 250);
+    if (!recorder || muted || speaking || recorder.state === 'recording') return;
     recorder.start();
-    liveState.textContent = 'listening';
-    liveState.className = 'dim mono listening';
-    talk.classList.add('recording');
+    setState('listening', 'listening');
   }
 
   function endTurn() {
     if (recorder && recorder.state === 'recording') recorder.stop();
-    talk.classList.remove('recording');
+  }
+
+  function discardTurn() {
+    if (recorder && recorder.state === 'recording') { sendNext = false; recorder.stop(); }
   }
 
   // Silence, not a timer, ends a turn: the browser can hear when you stopped.
-  function watchLevel(stream) {
+  function watchLevel() {
     audioCtx = audioCtx || new AudioContext();
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 512;
@@ -264,7 +293,7 @@
     let quietFor = 0, spokeAtAll = false;
 
     setInterval(() => {
-      if (!recorder || recorder.state !== 'recording' || !auto.checked) return;
+      if (!recorder || recorder.state !== 'recording' || muted) return;
       analyser.getByteTimeDomainData(data);
       let sum = 0;
       for (const v of data) sum += (v - 128) ** 2;
@@ -274,11 +303,6 @@
       if (spokeAtAll && quietFor >= 800) { spokeAtAll = false; quietFor = 0; endTurn(); }
     }, 100);
   }
-
-  talk.onmousedown = () => { auto.checked = false; startTurn(); };
-  talk.onmouseup = () => endTurn();
-  talk.onkeydown = (e) => { if (e.code === 'Space') { auto.checked = false; startTurn(); } };
-  talk.onkeyup = (e) => { if (e.code === 'Space') endTurn(); };
 
   poll();
   setInterval(poll, 2000);

@@ -49,7 +49,9 @@ async def test_the_phone_page_offers_a_placed_call(client, rt, seed):
     assert [c["id"] for c in ringing] == [call_id], "offering it is what makes it ring"
 
     page = (await client.get("/phone")).text
-    assert "Incoming call" in page and "Hold to talk" in page
+    assert "Incoming call" in page and "Answer" in page
+    # one control during a call, not a push-to-talk you have to hold
+    assert 'id="mute"' in page and "Hold to talk" not in page
 
 
 async def test_declining_reaches_the_retry_ladder(client, rt, seed):
