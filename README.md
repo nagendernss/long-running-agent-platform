@@ -190,6 +190,15 @@ latest applied fact and falls back to the base column. Below-threshold extractio
 land as `proposed` plus a review task, unregistered fields as `rejected` — so the
 same code path handles auto-apply, human confirmation, and refusal.
 
+**A correction is a reason to try again now.** Learning the right number means the
+attempt currently being waited on went somewhere that does not reach them, so the
+deadline armed for it is measuring silence from a wrong address. An applied change to
+`phone`, `email` or `preferred_channel` on the contact being chased reschedules within
+minutes (`RETRY_AFTER_CORRECTION_MINUTES`) instead of leaving the instance on a
+three-day deadline. It only fires while that deadline is what the instance is waiting
+on: a reply that also said "call back next week" sets `dynamic_reschedule`, and that
+answer wins whichever order the two signals arrive in.
+
 **Silence is an outcome.** The retry ladder used to advance only when an explicit
 NO_ANSWER signal arrived from outside, so an outreach nobody ever answered - the normal
 case for an unanswered call or email - left the instance waiting forever with nothing

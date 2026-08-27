@@ -11,8 +11,9 @@ must not touch it.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -43,6 +44,11 @@ from app.workflows.registry import WorkflowRegistry
 from app.write_back import WriteBackResolver
 
 log = logging.getLogger(__name__)
+
+# Fields that change *how we reach them*. Correcting one means the attempt currently
+# being waited on went to the wrong place, so it is worth trying again promptly.
+REACHABILITY_FIELDS = frozenset({"phone", "email", "preferred_channel"})
+RETRY_AFTER_CORRECTION = timedelta(minutes=int(os.environ.get("RETRY_AFTER_CORRECTION_MINUTES", "5")))
 
 
 def _uuid(value: uuid.UUID | str) -> uuid.UUID:
@@ -435,6 +441,8 @@ class Engine:
                     suggested_options=["apply", "reject"],
                     extra={"fact_id": str(fact.id), "field": fact.field, "new_value": fact.new_value},
                 )
+            elif fact.status == "applied":
+                await self._retry_after_correction(session, instance, fact, now)
 
         elif isinstance(signal, ActionRequired):
             # The other party is waiting on US. Park the requirement on the instance so
@@ -507,6 +515,31 @@ class Engine:
         await log_event(session, instance.id, "requirement_completed", done, now=now)
         await self.scheduler.schedule_wake(session, instance, now, reason="resume_after_requirement")
         return True
+
+    async def _retry_after_correction(
+        self, session: AsyncSession, instance: WorkflowInstance, fact, now: datetime
+    ) -> None:
+        """Being told the right number is a reason to try again now, not in three days.
+
+        The attempt that is being waited on went somewhere that does not reach them, so
+        the deadline armed for it is measuring silence from a wrong address. Only fires
+        while that deadline is what the instance is waiting on: a reply that also asked
+        us to call back in a fortnight sets `dynamic_reschedule`, and that answer wins.
+        """
+        if fact.field not in REACHABILITY_FIELDS or instance.status != "active":
+            return
+        if str(fact.entity_id) != str(instance.context.get("target_contact_id") or ""):
+            return  # they corrected somebody else's details, not the one we are chasing
+        if instance.wake_reason not in (None, "response_timeout"):
+            return
+
+        contact = await self._target_contact(session, instance)
+        at = apply_scheduling_constraints(now + RETRY_AFTER_CORRECTION, contact, key=str(instance.id))
+        await self.scheduler.schedule_wake(session, instance, at, reason="retry_after_correction")
+        await self.ctx(session).log(
+            instance, "outcome_recorded",
+            {"outcome": "reachability_corrected", "field": fact.field, "at": at.isoformat()},
+        )
 
     # -- human-in-the-loop (minimal resolve path) ----------------------------------
     async def resolve_review_task(

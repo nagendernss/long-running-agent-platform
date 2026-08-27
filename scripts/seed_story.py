@@ -20,7 +20,8 @@ from app.db.models import CaseRecord, Contact, ReviewTask, WorkflowInstance
 from app.db.session import make_engine
 from app.runtime import build_runtime
 
-TABLES = "review_task, entity_fact_version, event, workflow_instance, case_record, contact, procrastinate_jobs"
+TABLES = ("call, review_task, entity_fact_version, event, workflow_instance, "
+          "case_record, contact, procrastinate_jobs")
 
 
 async def reset_database(settings: Settings | None = None) -> None:
