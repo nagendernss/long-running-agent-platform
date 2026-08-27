@@ -367,8 +367,9 @@ answers the phone, so calls are offered one at a time, oldest first, and nothing
 while a call is live. The ring timeout starts when a call is actually *offered* rather
 than when it was placed - a call waiting behind a twenty-minute conversation has not
 been ignored, and timing it out for that would turn a busy hour into a pile of false
-no-answers. A call that rings out is a no-answer through the usual path, and the next
-one comes forward immediately.
+no-answers. A call rings for a minute
+(`CALL_RING_TIMEOUT_SECONDS`); after that it is a no-answer through the usual path,
+and the next one comes forward immediately.
 
 Each turn on the phone page shows what the machinery did, not just the words: what
 speech recognition heard, how long it took, which model answered and how long it
@@ -387,7 +388,7 @@ tasks, both with a `queueing_lock` so they do not multiply across a fleet.
 | Task | When | What it does |
 |---|---|---|
 | `hc:recover_lost_wakes` | every 5 minutes, and once at worker start-up | requeues jobs stalled by a dead worker; re-arms any active instance past due with no live job |
-| `hc:sweep_calls` | every minute | times out the call currently ringing and brings the next one forward |
+| `hc:sweep_calls` | every minute | rings a call out after a minute unanswered, then brings the next one forward |
 | `hc:prune_finished_jobs` | daily at 03:17 | deletes Procrastinate jobs finished more than 30 days ago |
 
 The recovery sweep exists because a wake lives in two records written on two

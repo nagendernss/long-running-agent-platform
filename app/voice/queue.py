@@ -15,6 +15,7 @@ Two rules keep that honest:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -26,7 +27,9 @@ from app.voice.session import miss_call
 
 log = logging.getLogger(__name__)
 
-RING_TIMEOUT = timedelta(seconds=90)
+# A minute of ringing is as long as anyone waits. After that the call is a no-answer
+# and the next one in the queue gets its turn.
+RING_TIMEOUT = timedelta(seconds=int(os.environ.get("CALL_RING_TIMEOUT_SECONDS", "60")))
 
 
 @dataclass

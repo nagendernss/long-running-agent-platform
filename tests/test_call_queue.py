@@ -126,3 +126,19 @@ async def test_the_sweep_is_registered_to_run_on_its_own(rt):
 
     periodic = {p.task.name: p.cron for p in rt.procrastinate_app.periodic_registry.periodic_tasks.values()}
     assert periodic.get(CALLS_TASK_NAME) == CALLS_CRON, "a queue nothing drains is a queue that stalls"
+
+
+async def test_a_call_rings_for_a_minute(rt, seed):
+    """Long enough for someone to reach the phone, short enough that a queue behind it
+    is not held up by a call nobody is going to take."""
+    assert RING_TIMEOUT == timedelta(seconds=60)
+
+    call_id = await place(rt, seed)
+    async with rt.session_factory() as s, s.begin():
+        await offer_next(s, rt.clock)
+
+    rt.clock.advance(timedelta(seconds=59))
+    assert (await sweep_calls(rt.session_factory, rt.clock, rt.engine))["timed_out"] is None
+
+    rt.clock.advance(timedelta(seconds=2))
+    assert (await sweep_calls(rt.session_factory, rt.clock, rt.engine))["timed_out"] == str(call_id)
