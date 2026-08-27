@@ -314,3 +314,70 @@ def test_a_workflows_own_note_reaches_the_prompt():
     brain = stub_brain(lambda r: gemini_reply([]), prompt_notes_for=lambda wt: "treat mentions of frost as FLAGGED")
     prompt = brain._prompt(CTX, brain.signal_classes("medical_records_followup"))
     assert "This workflow adds: treat mentions of frost as FLAGGED" in prompt
+
+
+# ---------------------------------------------------------------- key rotation
+async def test_a_key_out_of_quota_rotates_to_the_next_one():
+    """We hit 429s repeatedly on one key during development. Waiting does not fix a
+    spent quota; another key does."""
+    seen: list[str] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        key = request.headers["x-goog-api-key"]
+        seen.append(key)
+        if key == "spent":
+            return httpx.Response(429, json={"error": "quota"})
+        return gemini_reply([{"type": "NO_ANSWER", "confidence": 1.0, "evidence": "vm"}])
+
+    brain = stub_brain(responder, retry_delays=(0.0,))
+    brain.api_keys = ("spent", "fresh")
+    signals = await brain.extract_signals("no answer", CTX)
+
+    assert seen == ["spent", "fresh"], "rotated immediately rather than sleeping"
+    assert [s.type for s in signals] == ["NO_ANSWER"] and brain.last_source == "gemini"
+    assert brain.api_key == "fresh", "and stays on the key that worked"
+
+
+async def test_a_rejected_key_rotates_too():
+    calls: list[str] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers["x-goog-api-key"])
+        if request.headers["x-goog-api-key"] == "revoked":
+            return httpx.Response(403, json={"error": "permission denied"})
+        return gemini_reply([{"type": "NO_ANSWER", "confidence": 1.0, "evidence": "vm"}])
+
+    brain = stub_brain(responder, retry_delays=(0.0,))
+    brain.api_keys = ("revoked", "good")
+    assert [s.type for s in await brain.extract_signals("no answer", CTX)] == ["NO_ANSWER"]
+    assert calls == ["revoked", "good"]
+
+
+async def test_when_every_key_is_spent_it_still_falls_back_to_rules():
+    calls: list[str] = []
+
+    def all_spent(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers["x-goog-api-key"])
+        return httpx.Response(429, json={"error": "quota"})
+
+    brain = stub_brain(all_spent, retry_delays=(0.0,))
+    brain.api_keys = ("a", "b")
+    assert [s.type for s in await brain.extract_signals("no answer, voicemail", CTX)] == ["NO_ANSWER"]
+    assert brain.last_source == "fallback"
+    assert set(calls) == {"a", "b"}, "both were tried before giving up"
+
+
+async def test_a_server_error_is_retried_on_the_same_key_not_rotated():
+    """A 500 is the provider having a bad moment; a different key will not help."""
+    calls: list[str] = []
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers["x-goog-api-key"])
+        if len(calls) == 1:
+            return httpx.Response(503, text="unavailable")
+        return gemini_reply([{"type": "NO_ANSWER", "confidence": 1.0, "evidence": "vm"}])
+
+    brain = stub_brain(flaky, retry_delays=(0.0,))
+    brain.api_keys = ("a", "b")
+    assert [s.type for s in await brain.extract_signals("no answer", CTX)] == ["NO_ANSWER"]
+    assert calls == ["a", "a"], "same key, retried"

@@ -33,6 +33,8 @@ log = logging.getLogger(__name__)
 DEFAULT_MODEL = "gemini-3.6-flash"
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
 RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+# A different key can fix these; retrying the same one cannot.
+ROTATE_STATUSES = frozenset({401, 403, 429})
 RETRY_DELAYS = (1.0, 4.0)  # short: this runs inside the inbound path
 
 GENERIC_SIGNAL_CLASSES: tuple[type[Signal], ...] = (Reschedule, NoAnswer, EntityUpdate, ActionRequired, NeedsHuman)
@@ -189,7 +191,7 @@ class GeminiAgentBrain:
 
     def __init__(
         self,
-        api_key: str,
+        api_key: str | Sequence[str],
         *,
         model: str = DEFAULT_MODEL,
         domain_signals_for: Callable[[str], Iterable[type[Signal]]] | None = None,
@@ -200,7 +202,10 @@ class GeminiAgentBrain:
         client: httpx.AsyncClient | None = None,
         retry_delays: Sequence[float] = RETRY_DELAYS,
     ):
-        self.api_key = api_key
+        self.api_keys: tuple[str, ...] = (api_key,) if isinstance(api_key, str) else tuple(api_key)
+        if not self.api_keys:
+            raise ValueError("GeminiAgentBrain needs at least one API key")
+        self._key_index = 0        # sticky: stay on whichever key last worked
         self.model = model
         self._domain_signals_for = domain_signals_for or (lambda _wt: [])
         self._prompt_notes_for = prompt_notes_for or (lambda _wt: None)
@@ -210,6 +215,17 @@ class GeminiAgentBrain:
         self._client = client
         self._retry_delays = tuple(retry_delays)
         self.last_source: str | None = None  # "gemini" | "fallback" - handy in logs/tests
+
+    @property
+    def api_key(self) -> str:
+        return self.api_keys[self._key_index]
+
+    def _rotate_key(self) -> bool:
+        """Move to the next key. Returns False once every key has been tried."""
+        if len(self.api_keys) < 2:
+            return False
+        self._key_index = (self._key_index + 1) % len(self.api_keys)
+        return True
 
     def signal_classes(self, workflow_type: str) -> list[type[Signal]]:
         return [*GENERIC_SIGNAL_CLASSES, *self._domain_signals_for(workflow_type)]
@@ -241,11 +257,18 @@ class GeminiAgentBrain:
         (honouring Retry-After when the provider sends one), then give up to the
         fallback rather than hold the inbound transaction open any longer."""
         last: Exception | None = None
+        keys_tried = 1
         for attempt in range(len(self._retry_delays) + 1):
             try:
                 return await self._call(prompt, message_text, schema)
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code not in RETRY_STATUSES or attempt == len(self._retry_delays):
+                status = exc.response.status_code
+                # Out of quota or a rejected key: another key fixes it, waiting does not.
+                if status in ROTATE_STATUSES and keys_tried < len(self.api_keys) and self._rotate_key():
+                    keys_tried += 1
+                    log.warning("gemini key %s returned %s, trying the next key", self._key_index, status)
+                    continue
+                if status not in RETRY_STATUSES or attempt == len(self._retry_delays):
                     raise
                 last = exc
                 delay = self._retry_delays[attempt]

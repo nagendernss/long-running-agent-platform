@@ -29,12 +29,12 @@ def build_brain(settings: Settings, registry: WorkflowRegistry, field_registry: 
     rules = RuleBasedAgentBrain(domain_rules_for=lambda wt: registry.get(wt).keyword_rules)
     if settings.agent_brain != "gemini":
         return rules
-    if not settings.gemini_api_key:
+    if not settings.gemini_api_keys:
         raise RuntimeError("AGENT_BRAIN=gemini but GEMINI_API_KEY is not set")
     from app.llm_brain import GeminiAgentBrain  # imported lazily: httpx only needed for this path
 
     return GeminiAgentBrain(
-        settings.gemini_api_key,
+        settings.gemini_api_keys,
         model=settings.gemini_model,
         domain_signals_for=lambda wt: registry.get(wt).domain_signals,
         prompt_notes_for=lambda wt: getattr(registry.get(wt), "prompt_notes", None),
